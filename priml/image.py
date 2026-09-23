@@ -16,12 +16,14 @@ from __future__ import annotations
 
 from ctypes.util import find_library
 from io import BytesIO
+from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal, Protocol, cast
 
 import ctypes
 import functools
 import io
 import logging
+import platform
 import warnings
 
 import imagesize
@@ -31,11 +33,12 @@ import webp
 
 if TYPE_CHECKING:
     from PIL import Image
-    from turbojpeg import TurboJPEG
+    from turbojpeg import DEFAULT_LIB_PATHS, TurboJPEG
 else:
     from wrapt import lazy_import
 
     Image = lazy_import("PIL.Image")  # ~60 ms; only the PIL decoder and probes need it.
+    DEFAULT_LIB_PATHS = lazy_import("turbojpeg", "DEFAULT_LIB_PATHS")
 
 
 logger = logging.getLogger(__name__)
@@ -519,8 +522,19 @@ def _check_tj(lib: _TurboJpegLib, handle: int, status: int) -> None:
 
 @functools.cache
 def _libturbojpeg() -> _TurboJpegLib:
-    """Load libturbojpeg as PyTurboJPEG's first lookup does, and declare ABIs."""
+    """Load libturbojpeg as PyTurboJPEG's lookups do, and declare ABIs."""
     path = find_library("turbojpeg")
+    if path is None:
+        # Homebrew on Apple Silicon is off the linker path; PyTurboJPEG then
+        # tries its fixed install locations, so the region decoder must too.
+        path = next(
+            (
+                p
+                for p in DEFAULT_LIB_PATHS.get(platform.system(), [])
+                if Path(p).exists()
+            ),
+            None,
+        )
     if path is None:
         raise OSError("libturbojpeg not found.")
     lib = ctypes.CDLL(path)

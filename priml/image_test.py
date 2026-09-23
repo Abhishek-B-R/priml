@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from io import BytesIO
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
+
+import platform
 
 from PIL import Image
 from turbojpeg import (
+    DEFAULT_LIB_PATHS,
     TJFLAG_FASTDCT,
     TJPF_RGB,
     TJSAMP_411,
@@ -22,6 +25,7 @@ import numpy as np
 import pytest
 
 from priml.image import (
+    _libturbojpeg,
     _parse_crop,
     decode_image_pil,
     decode_jpeg_turbojpeg,
@@ -31,6 +35,10 @@ from priml.image import (
     get_mime,
     resize,
 )
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _jpeg_bytes(
@@ -310,6 +318,39 @@ class TestDecodeJpegTurbojpeg:
         arr = decode_jpeg_turbojpeg_region(data, x=x, y=y, w=w, h=h, fast_dct=True)
         assert arr is not None
         np.testing.assert_array_equal(arr, fast[y : y + h, x : x + w])
+
+    def test_region_decoder_falls_back_to_the_default_lib_paths(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Off the linker path (Homebrew on Apple Silicon), look where PyTurboJPEG does."""
+        lib = tmp_path / "libturbojpeg.dylib"
+        lib.touch()
+        paths = [str(tmp_path / "missing" / lib.name), str(lib)]
+        _libturbojpeg.cache_clear()
+        try:
+            with (
+                patch("priml.image.find_library", return_value=None),
+                patch.dict(DEFAULT_LIB_PATHS, {platform.system(): paths}),
+                patch("priml.image.ctypes.CDLL") as cdll,
+            ):
+                _libturbojpeg()
+            cdll.assert_called_once_with(str(lib))
+        finally:
+            _libturbojpeg.cache_clear()
+
+    def test_region_decoder_without_a_library_raises(self, tmp_path: Path) -> None:
+        missing = str(tmp_path / "libturbojpeg.dylib")
+        _libturbojpeg.cache_clear()
+        try:
+            with (
+                patch("priml.image.find_library", return_value=None),
+                patch.dict(DEFAULT_LIB_PATHS, {platform.system(): [missing]}),
+                pytest.raises(OSError, match="libturbojpeg not found"),
+            ):
+                _libturbojpeg()
+        finally:
+            _libturbojpeg.cache_clear()
 
     def test_decode_error(self) -> None:
         mock_turbo = MagicMock()
