@@ -1,11 +1,12 @@
-"""Reproduce the ARC-AGI-1 blog-post experiment with public Priml.
+r"""Reproduce the ARC-AGI-1 blog-post experiment with public Priml.
 
 From the Priml repository root, set up the environment and exp004 data:
   uv sync --all-groups
   priml/baselines/arcagi1/scripts/prepare_data.py --experiment exp004
 
 Train from scratch on eight visible H200 GPUs and score at step 280,000:
-  uv run torchrun --standalone --nproc_per_node=8 scripts/reproduce_blog_post.py
+  uv run torchrun --standalone --nproc_per_node=8 \
+    priml/baselines/arcagi1/scripts/reproduce_blog_post.py
 On successful completion, Priml scores first, then writes a distributed
 checkpoint directory at
   /opt/scratch/runs/arcagi1/exp004_blog_8gpu/checkpoints/step_00280000.pt/
@@ -16,7 +17,7 @@ This option accepts only the SHA-pinned historical archive, not a new Priml
 checkpoint produced by the training command above.
 
 To train on one GX10/GB10 (128 GB shared memory):
-  uv run python scripts/reproduce_blog_post.py
+  uv run python priml/baselines/arcagi1/scripts/reproduce_blog_post.py
 Its final checkpoint is the native file
   /opt/scratch/runs/arcagi1/exp004_blog_gx10/checkpoints/step_00280000.pt
 The GX10 path was smoke-tested for two optimizer steps. It uses one GPU and
