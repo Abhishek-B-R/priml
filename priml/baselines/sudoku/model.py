@@ -488,7 +488,7 @@ class SudokuNet(nn.Module):
         """Blocks in the reasoning stack, applied per core application."""
 
         embedding: GridConfig = field(default_factory=GridEmbedding.Config)
-        """Input embedding: tokens plus whatever additive channels_in apply."""
+        """Input embedding: tokens plus whatever additive channels apply."""
 
         block: Makeable[TensorModule] = field(
             default_factory=lambda: TransformerBlock.Config(prenorm=False),
@@ -688,8 +688,8 @@ class SudokuNet(nn.Module):
         self.config = config
         c = config.channels_in
         # Registered first, filled after the blocks: parameter ORDER follows
-        # registration, and the legacy TRM held its prefix parameters directly, so
-        # they led. A norm over the body sums in that order, and a compiled float32
+        # registration, and the reference TRM held its prefix parameters directly,
+        # so they led. A norm over the body sums in that order, and a compiled float32
         # reduction lands a different last bit when the order changes.
         self.register_module("prefix", None)
         # Construction order fixes the global-RNG draw order, so a seeded init

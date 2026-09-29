@@ -1,8 +1,8 @@
 """Frozen ARC2 records, and the helpers that compare them.
 
 The implementation this recipe was ported from was run once through each
-test's own recorder, and what it produced is
-kept in ``testdata/<module>.pt``: one flat name-to-tensor record per case. A
+test's own recorder, and what it produced is kept in ``testdata/<module>.pt``:
+one flat name-to-tensor record per case. A
 scalar is kept as a rank-0 tensor and any other leaf as its ``repr`` encoded to
 bytes, so every leaf compares with ``torch.equal``. Nothing here imports the
 source, so the proof outlives it.

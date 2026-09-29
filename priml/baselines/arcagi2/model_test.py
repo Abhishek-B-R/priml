@@ -1,7 +1,7 @@
 """Exact source checks for the ARC2 reference recipe's reusable components.
 
 The model this recipe was ported from was recorded once through
-:func:`record_model`; the port must reproduce every digest.
+:func:`record_model`; the port must reproduce every recorded tensor.
 """
 
 from __future__ import annotations

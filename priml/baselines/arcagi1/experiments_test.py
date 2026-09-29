@@ -10,8 +10,7 @@ ladder stays checkable on any machine.
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, cast
 
 import inspect
 
@@ -45,13 +44,11 @@ from priml.model.transformer.block import TransformerBlock
 from priml.optimizers import AdamATan2
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.muon import Muon
+from priml.testing.golden import assert_text_golden
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-
-_CWD: Final = Path(__file__).resolve().parent
 
 
 LADDER: list[tuple[str, Callable[[], ArcTrainLoop]]] = [
@@ -299,17 +296,14 @@ def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> Non
 
     Refresh with ``--golden-overwrite`` after reading the diff.
     """
-    golden = _CWD / "testdata" / "exp000.txt"
-    rendered = pformat(
-        experiments.exp000().copy_tree().finalize(),
-        hide_default_values=False,
-    )
-    if request.config.getoption("--golden-overwrite", default=False):
-        golden.parent.mkdir(parents=True, exist_ok=True)
-        _ = golden.write_text(rendered + "\n", encoding="utf-8")
-    assert golden.read_text(encoding="utf-8") == rendered + "\n", (
-        "exp000 changed; read the diff, then rerun with --golden-overwrite "
-        "if the change is intended."
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="exp000",
+        rendered=pformat(
+            experiments.exp000().copy_tree().finalize(),
+            hide_default_values=False,
+        ),
     )
 
 

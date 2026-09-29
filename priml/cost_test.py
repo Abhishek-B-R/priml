@@ -247,6 +247,59 @@ def test_matmul_cost_counts_the_whole_invocation_in_integers() -> None:
     assert c.params == c.params_active == 9
 
 
+def test_matmul_cost_prices_a_packed_weight_at_its_stored_bytes() -> None:
+    # 12 weights at 2.5 bits plus two fp16 group scales: 30 bits + 4 bytes.
+    packed = 4 + 4
+    c = matmul_cost(
+        channels_in=4,
+        channels_out=3,
+        rows=2,
+        dtype=BF,
+        weight_bytes=packed,
+        dequant_flops=3,
+    )
+    moved = 2 * (2 * 4 + 2 * 3) + packed
+    assert c["bytes", "primal", "matmul", BF] == moved
+    assert c["bytes", "adjoint", "matmul", BF] == 2 * moved
+    assert c["flops", "primal", "matmul", BF] == 2 * 2 * 12
+    assert c["flops", "primal", "elementwise", BF] == 3 * 12
+    assert c["bytes", "primal", "elementwise"] == Cost()
+    assert c.params == c.params_active == 12
+
+
+def test_matmul_cost_dequantizes_once_per_invocation_not_per_row() -> None:
+    one = matmul_cost(channels_in=8, channels_out=8, rows=1, weight_bytes=40)
+    many = matmul_cost(channels_in=8, channels_out=8, rows=64, weight_bytes=40)
+    assert one["bytes", "primal", "matmul"].sum() - 4 * 16 == 40
+    assert many["bytes", "primal", "matmul"].sum() - 4 * 64 * 16 == 40
+    dq = matmul_cost(
+        channels_in=8,
+        channels_out=8,
+        rows=3,
+        weight_bytes=40,
+        dequant_flops=5,
+    )
+    assert dq["flops", "primal", "elementwise"].sum() == 5 * 8 * 8
+
+
+def test_matmul_cost_rejects_dequant_without_a_packed_weight() -> None:
+    with pytest.raises(ValueError, match="weight_bytes"):
+        matmul_cost(channels_in=2, channels_out=3, dequant_flops=1)
+
+
+def test_packed_weight_moves_decode_toward_the_memory_roofline() -> None:
+    dense = matmul_cost(channels_in=4096, channels_out=4096, dtype=BF)
+    packed = matmul_cost(
+        channels_in=4096,
+        channels_out=4096,
+        dtype=BF,
+        weight_bytes=4096 * 4096 * 5 // 16,
+    )
+    dense_bytes = dense["bytes", "primal"].sum()
+    packed_bytes = packed["bytes", "primal"].sum()
+    assert packed_bytes * 6 < dense_bytes
+
+
 def test_matmul_cost_rejects_fractional_execution_rows() -> None:
     with pytest.raises(TypeError, match="integer"):
         matmul_cost(channels_in=2, channels_out=3, rows=cast(int, _FRACTIONAL))

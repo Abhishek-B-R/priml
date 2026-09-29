@@ -1,4 +1,4 @@
-"""ARC2 sampling and padding, checked against source-minted digests."""
+"""ARC2 sampling and padding, checked against source-minted records."""
 
 from __future__ import annotations
 

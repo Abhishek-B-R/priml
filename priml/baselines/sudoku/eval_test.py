@@ -3,10 +3,10 @@
 The goldens in ``testdata/`` were recorded from the reference implementation
 this module was ported from; this module imports none of it. Every case runs
 one real runner end to end at tiny size on CPU -- no released checkpoint
-anywhere: generators and verifiers are trained inside
-the case, so the chain is trainer -> harvest -> verifier fits -> HPS /
-agreement lock / sieve, and the pipeline cases run it all segmented, screened,
-and triggered as exp012-exp014 do. Each records every array its runner writes,
+anywhere: generators and verifiers are trained inside the case, so the chain is
+trainer -> harvest -> verifier fits -> HPS / agreement lock / sieve, and the
+pipeline cases run it all segmented, screened, and triggered as exp012-exp014
+do. Each records every array its runner writes,
 its numeric metrics, and the trained weights, compared with ``torch.equal``.
 """
 

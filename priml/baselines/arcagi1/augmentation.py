@@ -50,9 +50,6 @@ class ArcSpec:
     vocab_color_offset: int = 2
     """First color token id; colors occupy ``[offset, offset + 10)``."""
 
-    aug_retries_factor: int = 5
-    """Rejection-sampling retry budget per augmentation, as a multiple of count."""
-
     @property
     def vocab_size(self) -> int:
         """Total token count: pad + eos + 10 colors (12 for the default offset)."""

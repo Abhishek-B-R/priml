@@ -22,12 +22,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import field
+from functools import cached_property
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Literal,
     NamedTuple,
     NotRequired,
+    Protocol,
     Self,
     TypedDict,
     cast,
@@ -221,6 +223,66 @@ class SignalDumpPayload(NamedTuple):
     pass_ks: tuple[int, ...]
 
 
+class TaskScore(NamedTuple):
+    """One task's per-K count of test inputs solved under the pass@K ranking."""
+
+    solved: tuple[int, ...]
+    """Solved test inputs, one entry per configured ``pass_ks`` value."""
+
+    num_inputs: int
+    """Test inputs the task asks for."""
+
+
+class ScoringRule(Protocol):
+    """Turns per-task pass@K counts into one reported score per K."""
+
+    name: str
+    """Metric prefix; each score is reported as ``"{name}@{k}"``."""
+
+    def __call__(self, tasks: Sequence[TaskScore], k_index: int) -> float:
+        """Score the ``k_index``-th K over every scored task."""
+        ...
+
+
+class StrictPass:
+    """Fraction of tasks with every test input solved: the official ARC Prize rule."""
+
+    class Config(Fig["StrictPass"]):
+        """Reported as ``strict@K``."""
+
+        name: str = "strict"
+        """Metric prefix."""
+
+    def __init__(self, config: Config) -> None:
+        self.name = config.name
+
+    def __call__(self, tasks: Sequence[TaskScore], k_index: int) -> float:
+        """Return the all-inputs-solved task fraction at one K."""
+        solved = sum(
+            task.num_inputs > 0 and task.solved[k_index] == task.num_inputs
+            for task in tasks
+        )
+        return solved / max(1, len(tasks))
+
+
+class PerOutputPass:
+    """Solved test inputs over all test inputs, pooled across tasks."""
+
+    class Config(Fig["PerOutputPass"]):
+        """Reported as ``per_output@K``."""
+
+        name: str = "per_output"
+        """Metric prefix."""
+
+    def __init__(self, config: Config) -> None:
+        self.name = config.name
+
+    def __call__(self, tasks: Sequence[TaskScore], k_index: int) -> float:
+        """Return the pooled solved-input fraction at one K."""
+        solved = sum(task.solved[k_index] for task in tasks)
+        return solved / max(1, sum(task.num_inputs for task in tasks))
+
+
 class CanonicalPassK:
     """TRM reference pass@K over canonical test inputs, task-normalized.
 
@@ -260,6 +322,14 @@ class CanonicalPassK:
         transform: Makeable[ColorDihedral] = field(default_factory=ColorDihedral.Config)
         """Color/dihedral policy that encoded the prepared identifiers."""
 
+        rules: list[Makeable[ScoringRule]] = field(
+            default_factory=list[Makeable[ScoringRule]],
+        )
+        """Extra per-task scoring rules, each reported beside ``pass@K``."""
+
+        exclude_tasks: list[str] = field(default_factory=list[str])
+        """Tasks dropped before scoring, shrinking every denominator."""
+
         @override
         def finalize(self) -> Self:
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
@@ -268,26 +338,42 @@ class CanonicalPassK:
     def __init__(self, config: Config) -> None:
         self.config = config
         self._transform = config.transform.make()
-        root = Path(config.working_dir).expanduser()
-        self._identifier_map = ListCodec.coerce(
-            loads((root / "identifiers.json").read_text()),
+        self._root = Path(config.working_dir).expanduser()
+        self._rules: list[ScoringRule] = [rule.make() for rule in config.rules]
+        self.reset()
+
+    # Read on first use: the loop builds metrics before the dataset, which is what
+    # stages this tree on a fresh machine.
+    @cached_property
+    def _identifier_map(self) -> list[str]:
+        """``identifiers.json``: index is puzzle id."""
+        return ListCodec.coerce(
+            loads((self._root / "identifiers.json").read_text()),
             str,
         )
-        self._test_puzzles = {
+
+    @cached_property
+    def _test_puzzles(self) -> dict[str, dict[str, object]]:
+        """Scored tasks from ``test_puzzles.json``, minus ``exclude_tasks``."""
+        excluded = set(self.config.exclude_tasks)
+        return {
             name: DictCodec.coerce(puzzle)
             for name, puzzle in DictCodec.coerce(
-                loads((root / "test_puzzles.json").read_text()),
+                loads((self._root / "test_puzzles.json").read_text()),
             ).items()
+            if name not in excluded
         }
-        # The same blank id the loader pads with, so the two never desync.
-        meta_path = root / "test" / "dataset.json"
+
+    @cached_property
+    def _blank_identifier_id(self) -> int:
+        """The id the loader pads with, so the two never desync."""
+        meta_path = self._root / "test" / "dataset.json"
         meta = (
             DictCodec.coerce(loads(meta_path.read_text()))
             if meta_path.is_file()
             else {}
         )
-        self._blank_identifier_id = IntCodec.coerce(meta.get("blank_identifier_id", 0))
-        self.reset()
+        return IntCodec.coerce(meta.get("blank_identifier_id", 0))
 
     def reset(self) -> None:
         """Drop every accumulated ballot and dump row."""
@@ -441,10 +527,12 @@ class CanonicalPassK:
                     for k in pass_ks
                 },
             )
+            empty.update(self._rule_scores([]))
             if self._dump_enabled:
                 empty["extras"] = {"signal_dump": self._signal_dump_payload()}
             return empty
         per_task_pass1: list[tuple[str, float]] = []
+        task_scores: list[TaskScore] = []
         pass1_idx = pass_ks.index(1) if 1 in pass_ks else None
         n_no_preds = 0
         for name, puzzle in self._test_puzzles.items():
@@ -492,6 +580,7 @@ class CanonicalPassK:
                         if label_h in report_ranked[:k]:
                             per_test_report[rank_name][i] += 1
             n_test = len(pairs)
+            task_scores.append(TaskScore(tuple(per_test_correct), n_test))
             if n_test == 0:
                 continue
             if not task_had_preds:
@@ -513,6 +602,7 @@ class CanonicalPassK:
                     for i, k in enumerate(pass_ks)
                 },
             )
+        results.update(self._rule_scores(task_scores))
         self._log_per_task(results, per_task_pass1, n_test_puzzles, n_no_preds)
         if self._dump_enabled:
             results["extras"] = {"signal_dump": self._signal_dump_payload()}
@@ -554,6 +644,14 @@ class CanonicalPassK:
                 for ih, vs in by_input.items()
             }
             for name, by_input in state.get("preds", {}).items()
+        }
+
+    def _rule_scores(self, tasks: Sequence[TaskScore]) -> dict[str, float]:
+        """Score every configured rule at every K."""
+        return {
+            f"{rule.name}@{k}": rule(tasks, index)
+            for rule in self._rules
+            for index, k in enumerate(self.config.pass_ks)
         }
 
     def _signal_dump_payload(self) -> SignalDumpPayload:

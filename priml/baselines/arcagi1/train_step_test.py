@@ -29,17 +29,12 @@ import pytest
 import torch
 
 from priml.baselines.arcagi1 import experiments
-from priml.baselines.arcagi1.act import (
-    AtomicPool,
-)
+from priml.baselines.arcagi1.act import AtomicPool
 from priml.baselines.arcagi1.model import ConvSwiGLU
 from priml.baselines.arcagi1.train_step import TrmTrainStep
 from priml.baselines.arcagi2.model import RotaryBlock
 from priml.baselines.sudoku.embedding import GridEmbedding
-from priml.baselines.sudoku.model import (
-    DeepRecurrence,
-    SudokuNet,
-)
+from priml.baselines.sudoku.model import DeepRecurrence, SudokuNet
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.norm import RMSNorm
@@ -203,8 +198,8 @@ class PortSubject:
             "z_fast": pool.z_fast,
             "steps": pool.steps,
             "puzzle_ids": pool.puzzle_ids,
+            "halted": pool.halted,
         }
-        state["halted"] = pool.halted
         if pool.carry is not None:
             state["feedback"] = pool.feedback
         return state

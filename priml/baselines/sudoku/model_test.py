@@ -169,11 +169,11 @@ def test_prefix_tokens_reach_the_sequence() -> None:
 
 
 def test_prefix_parameters_lead_the_parameter_order() -> None:
-    """Prefix parameters come first, where the legacy TRM registered its prefix.
+    """Prefix parameters come first, where the reference TRM registered its prefix.
 
     A body norm sums parameters in registration order, and the compiled float32
     reduction behind it lands a different last bit when that order changes:
-    measured 1 ULP on ``param_norm`` against the legacy step.
+    measured 1 ULP on ``param_norm`` against the reference step.
     """
     config = _config()
     config.prefix = RegisterTokens.Config(num_tokens=2)

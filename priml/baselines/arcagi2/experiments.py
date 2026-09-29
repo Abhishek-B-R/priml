@@ -35,7 +35,7 @@ class ArcTrainLoop(
 
 
 def exp000() -> ArcTrainLoop:
-    """Return the full ARC2 reference recipe, corresponding to experimental exp001.
+    """Return the full ARC2 reference TRM recipe.
 
     Hypothesis:
       The shared priml building blocks reproduce the reference TRM exactly.

@@ -1,11 +1,11 @@
-"""Two-rank ARC2 sampling and optimizer collectives against source digests.
+"""Two-rank ARC2 sampling and optimizer collectives against source records.
 
 Each rank records its own view -- rank-local batches, gradients after the
 collective, dense and sparse updates, a resumed update, and both optimizer
 checkpoints -- and the record must equal the one the implementation this
-recipe was ported from produced on the same rank. Mutation
-controls drop one distributed mechanism at a time and must fail at the
-checkpoint that mechanism owns.
+recipe was ported from produced on the same rank. Mutation controls drop one
+distributed mechanism at a time and must fail at the checkpoint that mechanism
+owns.
 
 Training, including construction, is recorded under ``host_agnostic_numerics``
 for every fault arm alike, so the golden is portable across CPU ISAs.
