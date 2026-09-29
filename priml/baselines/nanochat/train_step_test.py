@@ -721,9 +721,9 @@ def test_the_recipes_schedule_holds_then_decays_to_zero() -> None:
 
 
 def test_the_selector_is_comparable_not_a_closure() -> None:
-    """A closure's repr carries an address, so a config holding one never equals its.
+    """A closure's repr carries an address, so no two configs holding one are equal.
 
-    Parent and every experiment diff shows a change.
+    Then every experiment would diff against its parent as changed.
     """
     assert matrix_parameters() == matrix_parameters()
 

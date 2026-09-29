@@ -1,8 +1,8 @@
-"""Exact ARC2 optimizer trajectories against source-minted digests.
+"""Exact ARC2 optimizer trajectories against source-minted records.
 
 The implementation this recipe was ported from was recorded once through
 :func:`record_trajectory`, in every width, autocast, and clipping arm; the port
-must reproduce every digest. Recording is under ``host_agnostic_numerics``
+must reproduce every recorded tensor. Recording is under ``host_agnostic_numerics``
 only: a native-numerics record would pin one host's last bits.
 """
 

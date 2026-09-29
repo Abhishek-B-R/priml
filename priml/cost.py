@@ -564,6 +564,8 @@ def matmul_cost(
     weight: bool = True,
     rows: int = 1,
     dtype: torch.dtype | None = None,
+    weight_bytes: int = 0,
+    dequant_flops: int = 0,
 ) -> Cost:
     """Cost one complete ``[M, K] @ [K, N]`` invocation and its adjoint.
 
@@ -576,29 +578,41 @@ def matmul_cost(
       rows: Concrete rows M processed by this invocation.
       dtype: Element type of every operand, gradients included; ``None`` is
         torch's default. Tags every cell and sets the bytes per element.
+      weight_bytes: Stored bytes of a packed right matrix -- codes, scales,
+        and codebooks together -- read once per invocation in place of
+        ``K * N`` elements at ``dtype``. Zero stores it at ``dtype``.
+      dequant_flops: Operations per weight to unpack a packed matrix once per
+        invocation, charged to the ``elementwise`` silo at ``dtype``.
 
     Returns:
       cost: Integer FLOPs and logical tensor bytes for the complete invocation.
-        Bias traffic belongs to elementwise and reduction silos.
+        Bias and dequantization belong to the elementwise silo.
 
     Raises:
       TypeError: ``rows`` is not an integer.
-      ValueError: ``rows`` is below one.
+      ValueError: ``rows`` is below one, or ``dequant_flops`` is set for an
+        unpacked matrix.
 
     """
     _validate_nonnegative_integer("channels_in", channels_in)
     _validate_nonnegative_integer("channels_out", channels_out)
+    _validate_nonnegative_integer("weight_bytes", weight_bytes)
+    _validate_nonnegative_integer("dequant_flops", dequant_flops)
     _validate_rows(rows)
+    if dequant_flops and not weight_bytes:
+        raise ValueError("dequant_flops needs a packed matrix; set weight_bytes.")
     dt = resolve_dtype(dtype)
     s = dt.itemsize
     products = channels_in * channels_out
     biases = channels_out if bias else 0
     params = (products if weight else 0) + biases
-    moved = s * (rows * channels_in + rows * channels_out + products)
+    stored = weight_bytes or s * products
+    moved = s * rows * (channels_in + channels_out) + stored
     return Cost(
         cells={
             ("flops", "primal", "matmul", dt): 2 * rows * products,
-            ("flops", "primal", "elementwise", dt): rows * biases,
+            ("flops", "primal", "elementwise", dt): rows * biases
+            + dequant_flops * products,
             ("flops", "adjoint", "matmul", dt): 4 * rows * products,
             ("flops", "adjoint", "reduction", dt): biases * (rows - 1),
             ("bytes", "primal", "matmul", dt): moved,

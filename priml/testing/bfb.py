@@ -1,6 +1,6 @@
 """Bit-for-bit golden-file unit-test harness.
 
-Pattern (see write-code skill rationale):
+Pattern:
 
 1. **Build** a module at minimum width: 1 layer, hidden=8, smallest seq_len.
 2. **Randomize** every parameter with seeded ``torch.randn`` so structurally-zero
@@ -32,11 +32,11 @@ Cross-architecture portability (the whole point):
   disagreement and every host lands on the same float32 bit -- measured 0 of
   4096 wrong for every op probed. It follows that a golden's floating comparand
   must be float32; ``_assert_portable_output_dtype`` also rejects complex
-  outputs. A runner returning the float64 scratch keeps that host's own libm error (one
-  did, off by 1 ULP between an Intel laptop and an AMD server). Only pure
-  data-movement ops
-  (views, reshapes, gathers) and correctly-rounded elementwise ops -- whose
-  float32 result is already host-independent -- stay in float32; they are the
+  outputs. A runner returning the float64 scratch keeps that host's own libm
+  error (one did, off by 1 ULP between an Intel laptop and an AMD server). Only
+  pure data-movement ops (views, reshapes, gathers) and correctly-rounded
+  elementwise ops -- whose float32 result is already host-independent -- stay
+  in float32; they are the
   ``_EXACT_F32_OPS`` allowlist. Every other float32 op is upcast by default, so
   a newly-introduced transcendental cannot silently leak: forgetting to list it
   upcasts it anyway. The allowlist is closed (IEEE-754 fixes which ops are
@@ -447,12 +447,12 @@ def assert_bfb_against_golden[InputT](
         ``seed``, runs ``module(input)``, and writes ``{golden_name}.pt``
         containing the pre-run state_dict and input whole, and a SHA-256 plus
         the first elements of the output and, when the run mutates state, of
-        every post-run tensor. ``randomize_parameters`` uses its
-        own seeded generator,
-        so it is independent of the global RNG ``build_input`` may consume.
+        every post-run tensor. ``randomize_parameters`` uses its own seeded
+        generator, so it is independent of the global RNG ``build_input`` may
+        consume.
       - Immediately reloads the just-written golden, reruns, and asserts
-        it round-trips bit-exactly. Regeneration fails loudly otherwise
-        (INF-018), so a non-reproducible golden is never committed.
+        it round-trips bit-exactly. Regeneration fails loudly otherwise, so a
+        non-reproducible golden is never committed.
       - A missing golden is recreated but still fails the test, forcing review
         before the next run accepts it. Explicit regeneration returns normally
         after the same round-trip check.
@@ -465,7 +465,7 @@ def assert_bfb_against_golden[InputT](
     The post-run state is captured unconditionally: a non-mutating
     ``forward`` may still mutate registered buffers (BatchNorm
     ``running_mean``, EMA caches), and those mutations are part of the
-    bit-for-bit contract (INF-017).
+    bit-for-bit contract.
 
     Args:
       golden_dir: Directory holding ``.pt`` golden files. Created if
@@ -545,7 +545,7 @@ def regenerate_golden[InputT](
 
     Equivalent to setting ``BFB_REGENERATE=1`` and calling
     ``assert_bfb_against_golden`` once. The freshly written golden is
-    replayed and must round-trip bit-exactly (INF-018).
+    replayed and must round-trip bit-exactly.
 
     Args:
       golden_dir: Directory for the golden file.
@@ -609,9 +609,8 @@ class _Golden(TypedDict):
 
     state_dict: dict[str, Tensor]
     input: object
-    output: NotRequired[Tensor]
-    output_digest: NotRequired[Tensor]
-    output_head: NotRequired[Tensor]
+    output_digest: Tensor
+    output_head: Tensor
     seed: int
     post_state_digest: NotRequired[dict[str, Tensor]]
     post_state_heads: NotRequired[dict[str, Tensor]]
@@ -740,29 +739,27 @@ def _replay_golden[InputT](
     inp = cast(InputT, move_to_device(payload["input"], device))
     with host_agnostic_numerics():
         output = run(module, inp)
-    # Checked on replay too, not only at mint: a golden written before this
-    # gate exists still carries a float64 comparand, and reporting WHY it is
-    # unportable beats an opaque one-ULP mismatch on someone else's host.
+    # Checked on replay too, not only at mint: a runner changed to return float64
+    # after the golden was minted is reported by cause, not as an opaque digest
+    # mismatch on someone else's host.
     _assert_portable_output_dtype(output)
-    if "output_digest" in payload:
-        _assert_digest_match(
-            output,
-            digest=payload["output_digest"],
-            head=payload.get("output_head"),
-            label="output",
-        )
-    else:
-        _assert_equal(output, payload.get("output"), label="output")
+    _assert_digest_match(
+        output,
+        digest=payload["output_digest"],
+        head=payload["output_head"],
+        label="output",
+    )
     # Absent means the run did not mutate its state, so the pre-run copy IS
     # the expectation -- a mutation introduced later then fails against it.
-    if "post_state_digest" in payload:
-        expected = {
+    expected: _PostState = (
+        {
             "digest": payload["post_state_digest"],
-            "heads": payload.get("post_state_heads", {}),
+            "heads": payload["post_state_heads"],
         }
-    else:
-        expected = post_state_record(payload["state_dict"])
-    _assert_state_match(module, cast(_PostState, expected))
+        if "post_state_digest" in payload and "post_state_heads" in payload
+        else post_state_record(payload["state_dict"])
+    )
+    _assert_state_match(module, expected)
 
 
 def _default_runner(module: nn.Module, inp: object) -> Tensor:
@@ -791,7 +788,7 @@ def _assert_state_match(module: nn.Module, golden: _PostState) -> None:
         _assert_digest_match(
             live[k],
             digest=golden["digest"][k],
-            head=golden["heads"].get(k),
+            head=golden["heads"][k],
             label=f"state[{k}]",
         )
 
@@ -800,12 +797,11 @@ def _assert_digest_match(
     value: Tensor,
     *,
     digest: Tensor,
-    head: Tensor | None,
+    head: Tensor,
     label: str,
 ) -> None:
     """Compare the leading elements (for a ULP report), then every bit via SHA-256."""
-    if head is not None:
-        _assert_equal(value.detach().reshape(-1)[:_HEAD].cpu(), head, label=label)
+    _assert_equal(value.detach().reshape(-1)[:_HEAD].cpu(), head, label=label)
     if not torch.equal(state_digest(value), digest):
         raise AssertionError(
             f"{label}: bitwise comparison failed (dtype, shape, or an element "
@@ -1066,7 +1062,7 @@ def _write_back(
     target: torch.dtype,
 ) -> object:
     """Restore an in-place / ``out=`` / foreach op's mutation onto the originals."""
-    schema = func._schema  # noqa: SLF001 -- The benchmark harness inspects private state to compare implementations.
+    schema = func._schema  # noqa: SLF001 -- The harness reads the op schema to find write arguments.
     # Copy each mutated float64 upcast copy back into its float32 original (the
     # side effect), recording (upcast_copy -> original) so a returned element
     # that IS a write target can be swapped to the caller's original. Returns
@@ -1254,7 +1250,7 @@ class _Float64Compute(TorchDispatchMode):
         result = _run_unfused(func, up_args, up_kwargs)
         if any(
             arg.alias_info is not None and arg.alias_info.is_write
-            for arg in func._schema.arguments  # noqa: SLF001 -- The benchmark harness inspects private state to compare implementations..
+            for arg in func._schema.arguments  # noqa: SLF001 -- The harness reads the op schema to find write arguments.
         ):
             # In-place / ``out=`` / foreach op: it mutated the float64 copies, not
             # the caller's originals. Narrow each back and return the originals

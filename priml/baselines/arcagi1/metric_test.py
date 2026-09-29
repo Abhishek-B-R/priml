@@ -13,7 +13,12 @@ import pytest
 import torch
 
 from priml.baselines.arcagi1.augmentation import ColorDihedral, SpatialAugmentation
-from priml.baselines.arcagi1.metric import CanonicalPassK, PassK
+from priml.baselines.arcagi1.metric import (
+    CanonicalPassK,
+    PassK,
+    PerOutputPass,
+    StrictPass,
+)
 
 
 if TYPE_CHECKING:
@@ -326,6 +331,105 @@ def test_canonical_equal_votes_keep_first_view_order(
         puzzle_identifiers=torch.ones(3, dtype=torch.long),
     )
     assert _pass_at(metric.compute()) == {"pass@1": 0.0, "pass@2": 1.0}
+
+
+# ``a``'s first input and ``b``'s only input expect ``[[5]]``; ``a``'s second expects
+# ``[[6]]``. So ``a`` is half solved and ``b`` fully solved.
+def _two_input_tree(tmp_path: Path) -> dict[str, object]:
+    """Tasks ``a`` (two test inputs) and ``b`` (one); every view answers ``[[5]]``."""
+    pack = SpatialAugmentation.Config(max_grid=2).make()
+    inputs = [
+        np.array([[2]], dtype=np.uint8),
+        np.array([[3]], dtype=np.uint8),
+        np.array([[4]], dtype=np.uint8),
+    ]
+    five = np.array([[5]], dtype=np.uint8)
+    packed = [
+        pack.pack(grid, five, training=False, rng=np.random.default_rng(0))
+        for grid in inputs
+    ]
+    (tmp_path / "identifiers.json").write_text(json.dumps(["<blank>", "a", "b"]))
+    (tmp_path / "test_puzzles.json").write_text(
+        json.dumps(
+            {
+                "a": {
+                    "test": [
+                        {"input": [[2]], "output": [[5]]},
+                        {"input": [[3]], "output": [[6]]},
+                    ],
+                },
+                "b": {"test": [{"input": [[4]], "output": [[5]]}]},
+            },
+        ),
+    )
+    return {
+        "logits": _packed(
+            torch.tensor(np.stack([answer for _, answer in packed])),
+            torch.zeros(3),
+        ),
+        "media": torch.tensor(np.stack([media for media, _ in packed])),
+        "puzzle_identifiers": torch.tensor([1, 1, 2]),
+    }
+
+
+def test_canonical_rules_score_strict_and_per_output(tmp_path: Path) -> None:
+    """A half-solved task earns task-mean credit, no strict credit, one output."""
+    batch = _two_input_tree(tmp_path)
+    logits = batch.pop("logits")
+    assert isinstance(logits, Tensor)
+    metric = CanonicalPassK.Config(
+        working_dir=tmp_path,
+        pass_ks=(1,),
+        rules=[StrictPass.Config(), PerOutputPass.Config()],
+    ).make()
+    metric.update(logits, **batch)
+    scores = metric.compute()
+    assert scores["pass@1"] == 0.75
+    assert scores["strict@1"] == 0.5
+    assert scores["per_output@1"] == 2 / 3
+
+
+def test_canonical_rules_are_off_by_default(tmp_path: Path) -> None:
+    batch = _two_input_tree(tmp_path)
+    logits = batch.pop("logits")
+    assert isinstance(logits, Tensor)
+    metric = CanonicalPassK.Config(working_dir=tmp_path, pass_ks=(1,)).make()
+    metric.update(logits, **batch)
+    assert not any(key.startswith(("strict", "per_output")) for key in metric.compute())
+
+
+def test_canonical_excluded_tasks_leave_every_denominator(tmp_path: Path) -> None:
+    """Scored as if the excluded task never existed; unknown names are ignored."""
+    batch = _two_input_tree(tmp_path)
+    logits = batch.pop("logits")
+    assert isinstance(logits, Tensor)
+    metric = CanonicalPassK.Config(
+        working_dir=tmp_path,
+        pass_ks=(1,),
+        rules=[StrictPass.Config(), PerOutputPass.Config()],
+        exclude_tasks=["b", "absent"],
+    ).make()
+    metric.update(logits, **batch)
+    scores = metric.compute()
+    assert scores["pass@1"] == 0.5
+    assert scores["strict@1"] == 0.0
+    assert scores["per_output@1"] == 0.5
+
+
+def test_canonical_construction_defers_reading_the_tree(tmp_path: Path) -> None:
+    """The loop builds metrics before the dataset stages the tree they read."""
+    root = tmp_path / "staged-later"
+    metric = CanonicalPassK.Config(
+        working_dir=root,
+        pass_ks=(1,),
+        rules=[StrictPass.Config()],
+    ).make()
+    root.mkdir()
+    batch = _two_input_tree(root)
+    logits = batch.pop("logits")
+    assert isinstance(logits, Tensor)
+    metric.update(logits, **batch)
+    assert metric.compute()["strict@1"] == 0.5
 
 
 def _pass_at(scores: Mapping[str, object]) -> dict[str, object]:

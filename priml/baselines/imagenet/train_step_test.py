@@ -154,7 +154,7 @@ def test_state_dict_round_trip_restores_progress_and_scaler() -> None:
 # The blur rewrite needs a stride-2 conv of at least 16 input channels to fire, so
 # ``conv2`` keeps 16 inputs; only its output and the head narrow.
 def _golden_net(num_classes: int) -> nn.Module:
-    """Half-width ``strided_net`` for the golden: 3->8->4 rather than 3->16->8."""
+    """Narrowed ``strided_net`` for the golden: 3->16->4 rather than 3->16->8."""
     return nn.Sequential(
         OrderedDict(
             conv1=nn.Conv2d(3, 16, 3, stride=2, padding=1, bias=False),
@@ -168,7 +168,6 @@ def _golden_net(num_classes: int) -> nn.Module:
     )
 
 
-# The resize, the blur rewrite, the fused loss, and the optimizer split all still run.
 # Pin the resolution to its 32 floor (the schedule rounds to a multiple of 32, so 32 is
 # the smallest it resizes to) rather than ramping to 64, and narrow the head net. The
 # resize, the blur rewrite, the fused loss, and the optimizer split all still run.

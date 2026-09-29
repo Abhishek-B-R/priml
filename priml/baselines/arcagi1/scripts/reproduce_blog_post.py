@@ -5,8 +5,8 @@
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
 Reproduce the ARC-AGI-1 blog-post experiment with public Priml.
 
-The blog post's model is exp008, the HPS bundle recipe (QK-norm, prediction
-feedback, corrupted-feedback repair over the URM). From the Priml repository
+The blog post's model is exp008: QK-norm, prediction feedback, and
+corrupted-feedback repair over the URM. From the Priml repository
 root, set up the environment and exp008 data:
   uv sync --all-groups
   priml/baselines/arcagi1/scripts/prepare_data.py --experiment exp008

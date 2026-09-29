@@ -1,4 +1,4 @@
-"""Canonicalized ARC2 voting, checked against source-minted digests."""
+"""Canonicalized ARC2 voting, checked against source-minted records."""
 
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ def record_votes(
     build: Callable[[Path], Voting],
     dihedral: Callable[[np.ndarray, int], np.ndarray],
 ) -> dict[str, Tensor]:
-    """Vote eight transformed views and digest the inputs and every score.
+    """Vote eight transformed views and record the inputs and every score.
 
     Args:
       root: Directory holding the manifest.

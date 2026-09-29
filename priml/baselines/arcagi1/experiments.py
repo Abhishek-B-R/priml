@@ -94,7 +94,7 @@ GRID_LEN: Final = 900
 """Cells in the 30x30 grid every ARC task is padded to."""
 
 VOCAB_SIZE: Final = 12
-"""Tokens: pad, a blank marker, and the ten ARC colors."""
+"""Tokens: pad, the content-boundary EOS, and the ten ARC colors."""
 
 NUM_PUZZLE_IDENTIFIERS: Final = 876_403
 """Distinct puzzle ids in ``arc1concept-aug-1000``: 876,402 puzzles plus blank.

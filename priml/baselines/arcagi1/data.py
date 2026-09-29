@@ -17,7 +17,7 @@ On disk::
     all__spatial_tags.npy       [n_puzzles, 3]    scale and offsets, if spatial
     dataset.json                shape and vocabulary metadata
 
-Tokens are ``0`` pad, ``1`` a blank marker, and ``2``-``11`` the ten ARC
+Tokens are ``0`` pad, ``1`` the content-boundary EOS, and ``2``-``11`` the ten ARC
 colors. Grids are padded to 30x30 because ARC grids vary in size and the model
 needs one shape.
 

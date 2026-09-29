@@ -942,9 +942,8 @@ def test_no_checked_in_golden_stores_an_unchanged_post_state() -> None:
     )
 
 
-# ``torch.load`` is untyped, so the shape is narrowed once here rather than cast at each
-# use. Only the state entries are typed: a golden also holds an input, an output, and a
-# seed, and claiming those are state dicts to satisfy one reader would be a false
+# Only the state entries are returned: a golden also holds an input, an output digest,
+# and a seed, and typing those as state dicts to satisfy one reader would be a false
 # annotation.
 def _loaded_golden(path: Path) -> dict[str, dict[str, Tensor]]:
     """Read a golden's two state dicts; a file with none (not a bfb golden) is empty."""
@@ -1031,11 +1030,11 @@ class _BufferMutatingModule(nn.Module):
 
 
 def test_bfb_captures_forward_buffer_mutation(tmp_path: Path) -> None:
-    """INF-017: a forward that mutates a buffer must round-trip bit-exactly.
+    """A forward that mutates a buffer must round-trip bit-exactly.
 
-    Without ``mutates_state`` the harness used to compare the post-forward
-    live state to the PRE-run golden and falsely fail. The buffer mutation
-    must be captured and compared bit-for-bit on its own.
+    Comparing the post-forward live state to the PRE-run golden would falsely
+    fail. The buffer mutation must be captured and compared bit-for-bit on
+    its own.
     """
     regenerate_golden(
         golden_dir=tmp_path,
@@ -1061,7 +1060,7 @@ def test_bfb_captures_forward_buffer_mutation(tmp_path: Path) -> None:
 
 
 def test_bfb_detects_forward_buffer_drift(tmp_path: Path) -> None:
-    """INF-017: a divergent buffer mutation must be caught."""
+    """A divergent buffer mutation must be caught."""
     regenerate_golden(
         golden_dir=tmp_path,
         golden_name="buffer_mutating",
@@ -1088,7 +1087,7 @@ def test_bfb_detects_forward_buffer_drift(tmp_path: Path) -> None:
 
 
 def test_regenerate_round_trips_immediately(tmp_path: Path) -> None:
-    """INF-018: regeneration must verify the freshly written golden round-trips.
+    """Regeneration must verify the freshly written golden round-trips.
 
     A regenerator that writes a golden whose output is not reproducible on
     reload must fail loudly during regeneration, not silently pass.
@@ -1147,7 +1146,7 @@ def test_failed_regeneration_preserves_the_last_valid_golden(tmp_path: Path) -> 
 
 
 def test_regenerate_round_trip_passes_for_clean_module(tmp_path: Path) -> None:
-    """INF-018: a deterministic module regenerates and self-verifies cleanly."""
+    """A deterministic module regenerates and self-verifies cleanly."""
     regenerate_golden(
         golden_dir=tmp_path,
         golden_name="clean",
@@ -1166,7 +1165,7 @@ def test_regenerate_round_trip_passes_for_clean_module(tmp_path: Path) -> None:
 
 
 # An exact-allowlist op must be host-independent: computing it in float64 and narrowing
-# back to float32 must reproduce the native float32 result bit-for- bit. An op that
+# back to float32 must reproduce the native float32 result bit-for-bit. An op that
 # fails this (e.g. a fused multiply-add rounding differently, or a vector-width-
 # dependent reduction) must NOT be allowlisted -- it has to be upcast like every other
 # arithmetic op.
@@ -1175,7 +1174,6 @@ def test_regenerate_round_trip_passes_for_clean_module(tmp_path: Path) -> None:
 # operand must be exactly float32-representable (an integer, a power of two, or a
 # flip/copy of the input) so the probe isolates the op under test rather than folding in
 # a second op's rounding.
-# result.
 def _f32_equals_f64_downcast(op: TensorFn) -> bool:
     """Report whether ``op``'s float32 result equals its float64-then-downcast."""
     gen = torch.Generator().manual_seed(0)
@@ -1277,8 +1275,9 @@ def test_declared_nonarithmetic_ops_are_actually_exact(name: str) -> None:
     """Each declared 'pure-movement/comparison' op really is f64-recompute-stable.
 
     The allowlist tags these ops ``movement``/``compare`` (exact by
-    construction); this proves it for every member that touches float32 data, so a future entry that
-    secretly does arithmetic (rounding-dependent) fails here rather than minting
+    construction); this proves it for every member that touches float32 data,
+    so a future entry that secretly does arithmetic (rounding-dependent) fails
+    here rather than minting
     a non-portable golden. Pure metadata ops with no float32 result (views,
     allocation) carry no value to compare and are exempt by inspection.
     """
@@ -1892,8 +1891,8 @@ def test_host_agnostic_multi_output_write_op_keeps_all_returns() -> None:
     ``_native_batch_norm_legit`` (training) writes ``running_mean``/
     ``running_var`` in place but returns a 3-tuple ``(output, save_mean,
     save_invstd)`` -- none of which is a write target. The write-back must return
-    the full 3-tuple of computed outputs, not a tuple of the 2 write originals
-    (the REFAC-001 collapse bug). Asserts the returned ``output`` has the input's
+    the full 3-tuple of computed outputs, not a tuple of the 2 write
+    originals. Asserts the returned ``output`` has the input's
     shape and is the normalized result, proving non-write returns survive.
     """
     x = torch.randn(2, 3, 4, dtype=torch.float32)
@@ -1998,31 +1997,23 @@ def test_bfb_rejects_a_float64_golden_output(tmp_path: Path) -> None:
 
 
 def test_bfb_rejects_a_float64_golden_on_replay(tmp_path: Path) -> None:
-    """A golden written BEFORE the gate still reports why it is unportable.
+    """A runner changed to return float64 after minting is refused by cause.
 
-    Minting is not the only entry point: the committed goldens predate this
-    check, so the replay path must name the cause too rather than failing on a
-    one-ULP comparison the reader cannot attribute.
+    Minting is not the only entry point, so the replay path must name the
+    cause too rather than failing on a digest mismatch the reader cannot
+    attribute.
     """
     regenerate_golden(
         golden_dir=tmp_path,
-        golden_name="legacy_f64",
+        golden_name="f64_replay",
         build_module=_build_min_linear,
         build_input=_build_min_input,
         seed=0,
     )
-    path = tmp_path / "legacy_f64.pt"
-    payload = DictCodec.coerce(
-        cast(object, torch.load(path, weights_only=False, map_location="cpu")),
-        default=None,
-    )
-    del payload["output_digest"], payload["output_head"]
-    payload["output"] = torch.zeros(2, 3, dtype=torch.float64)
-    torch.save(payload, path)
     with pytest.raises(TypeError, match="float64"):
         assert_bfb_against_golden(
             golden_dir=tmp_path,
-            golden_name="legacy_f64",
+            golden_name="f64_replay",
             build_module=_build_min_linear,
             build_input=_build_min_input,
             seed=0,
