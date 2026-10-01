@@ -26,6 +26,8 @@ import logging
 import platform
 import warnings
 
+from turbojpeg import DEFAULT_LIB_PATHS
+
 import imagesize
 import numpy as np
 import webp
@@ -33,12 +35,11 @@ import webp
 
 if TYPE_CHECKING:
     from PIL import Image
-    from turbojpeg import DEFAULT_LIB_PATHS, TurboJPEG
+    from turbojpeg import TurboJPEG
 else:
     from wrapt import lazy_import
 
     Image = lazy_import("PIL.Image")  # ~60 ms; only the PIL decoder and probes need it.
-    DEFAULT_LIB_PATHS = lazy_import("turbojpeg", "DEFAULT_LIB_PATHS")
 
 
 logger = logging.getLogger(__name__)
@@ -520,21 +521,15 @@ def _check_tj(lib: _TurboJpegLib, handle: int, status: int) -> None:
         raise RuntimeError(lib.tj3GetErrorStr(handle).decode())
 
 
+# ``find_library`` first, then PyTurboJPEG's per-platform install paths:
+# ``find_library`` misses Homebrew's prefix on Apple silicon.
 @functools.cache
 def _libturbojpeg() -> _TurboJpegLib:
-    """Load libturbojpeg as PyTurboJPEG's lookups do, and declare ABIs."""
-    path = find_library("turbojpeg")
-    if path is None:
-        # Homebrew on Apple Silicon is off the linker path; PyTurboJPEG then
-        # tries its fixed install locations, so the region decoder must too.
-        path = next(
-            (
-                p
-                for p in DEFAULT_LIB_PATHS.get(platform.system(), [])
-                if Path(p).exists()
-            ),
-            None,
-        )
+    """Load libturbojpeg where PyTurboJPEG finds it, and declare ABIs."""
+    path = find_library("turbojpeg") or next(
+        (p for p in DEFAULT_LIB_PATHS.get(platform.system(), []) if Path(p).exists()),
+        None,
+    )
     if path is None:
         raise OSError("libturbojpeg not found.")
     lib = ctypes.CDLL(path)

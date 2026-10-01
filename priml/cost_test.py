@@ -3,17 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import fields
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import functools
 import importlib
 import inspect
 import math
 import pathlib
-
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 from configgle import Fig
 
@@ -45,21 +41,16 @@ from priml.model.special import Skip
 from priml.model.swiglu import SwiGLU
 
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
 # -- Cost ------------------------------------------------------------------
 
 
-BF = torch.bfloat16
-F32 = torch.float32
-I64 = torch.int64
-_FRACTIONAL: object = 1.5
-
-
-def _cost_with_owned_count(field: str, value: int) -> Cost:
-    if field == "params":
-        return Cost(params=value)
-    if field == "params_active":
-        return Cost(params_active=value)
-    return Cost(bytes_state=value)
+BF: Final = torch.bfloat16
+F32: Final = torch.float32
+I64: Final = torch.int64
 
 
 def _t() -> Cost:
@@ -80,29 +71,41 @@ def test_full_key_reads_an_integer_and_a_missing_cell_is_zero() -> None:
     assert t["flops", "primal", "sort", F32] == 0
 
 
-@pytest.mark.parametrize("value", [_FRACTIONAL, True, -1])
+@pytest.mark.parametrize("value", [1.5, True, -1])
 def test_cost_rejects_invalid_cells(value: object) -> None:
     with pytest.raises((TypeError, ValueError), match="cell"):
         Cost(cells={("flops", "primal", "matmul", BF): cast(int, value)})
 
 
 @pytest.mark.parametrize("field", ["params", "params_active", "bytes_state"])
-@pytest.mark.parametrize("value", [_FRACTIONAL, True, -1])
+@pytest.mark.parametrize("value", [1.5, True, -1])
 def test_cost_rejects_invalid_owned_counts(field: str, value: object) -> None:
     with pytest.raises((TypeError, ValueError), match=field):
-        _cost_with_owned_count(field, cast(int, value))
+        (
+            Cost(params=cast(int, value))
+            if field == "params"
+            else Cost(params_active=cast(int, value))
+            if field == "params_active"
+            else Cost(bytes_state=cast(int, value))
+        )
 
 
 def test_partial_keys_slice_and_drop_the_fixed_leading_axes() -> None:
     t = _t()
-    assert t["flops", "primal"].cells == {("matmul", BF): 60, ("elementwise", F32): 4}
+    assert t["flops", "primal"].cells == {
+        ("matmul", BF): 60,
+        ("elementwise", F32): 4,
+    }
     assert t["flops", "adjoint", "matmul"].cells == {(BF,): 120}
     assert t["flops"].params == 0
 
 
 def test_axes_are_named_by_their_values_in_any_order() -> None:
     t = _t()
-    assert t["flops", "matmul"].cells == {("primal", BF): 60, ("adjoint", BF): 120}
+    assert t["flops", "matmul"].cells == {
+        ("primal", BF): 60,
+        ("adjoint", BF): 120,
+    }
     assert t[I64].cells == {("bytes", "adjoint", "selection"): 2}
     assert t[F32].sum() == 4
 
@@ -142,7 +145,10 @@ def test_intensity_is_a_separate_float_reporting_table() -> None:
     ratio = intensity(c)
     assert isinstance(ratio, Report)
     assert ratio["primal", "matmul", BF] == 15
-    assert ratio["matmul", BF].cells == {("primal",): 15.0, ("adjoint",): 30.0}
+    assert ratio["matmul", BF].cells == {
+        ("primal",): 15.0,
+        ("adjoint",): 30.0,
+    }
     assert ratio["primal", "selection", I64] == 0.0
     assert all(isinstance(value, float) for value in ratio.cells.values())
     assert intensity(Cost())["primal", "matmul", BF] == 0.0
@@ -209,7 +215,11 @@ def test_cost_is_one_table_and_three_owned_integers() -> None:
 
 
 def test_cost_add_sums_cells_and_ownership() -> None:
-    a = Cost(cells={("flops", "primal", "matmul", F32): 1}, params=3, bytes_state=7)
+    a = Cost(
+        cells={("flops", "primal", "matmul", F32): 1},
+        params=3,
+        bytes_state=7,
+    )
     b = Cost(cells={("flops", "primal", "matmul", F32): 10}, params=4)
     assert a + b == Cost(
         cells={("flops", "primal", "matmul", F32): 11},
@@ -233,7 +243,13 @@ def test_tile_scales_work_by_rows_and_ownership_by_copies() -> None:
 
 
 def test_matmul_cost_counts_the_whole_invocation_in_integers() -> None:
-    c = matmul_cost(channels_in=2, channels_out=3, bias=True, rows=4, dtype=BF)
+    c = matmul_cost(
+        channels_in=2,
+        channels_out=3,
+        bias=True,
+        rows=4,
+        dtype=BF,
+    )
     assert c["flops", "primal", "matmul", BF] == 48
     assert c["flops", "adjoint", "matmul", BF] == 96
     assert c["flops", "primal", "elementwise", BF] == 12
@@ -247,9 +263,63 @@ def test_matmul_cost_counts_the_whole_invocation_in_integers() -> None:
     assert c.params == c.params_active == 9
 
 
-def test_matmul_cost_rejects_fractional_execution_rows() -> None:
+def test_matmul_cost_prices_a_packed_weight_at_its_stored_bytes() -> None:
+    # 12 weights at 2.5 bits plus two fp16 group scales: 30 bits + 4 bytes.
+    packed = 4 + 4
+    c = matmul_cost(
+        channels_in=4,
+        channels_out=3,
+        rows=2,
+        dtype=BF,
+        weight_bytes=packed,
+        dequant_flops=3,
+    )
+    moved = 2 * (2 * 4 + 2 * 3) + packed
+    assert c["bytes", "primal", "matmul", BF] == moved
+    assert c["bytes", "adjoint", "matmul", BF] == 2 * moved
+    assert c["flops", "primal", "matmul", BF] == 2 * 2 * 12
+    assert c["flops", "primal", "elementwise", BF] == 3 * 12
+    assert c["bytes", "primal", "elementwise"] == Cost()
+    assert c.params == c.params_active == 12
+
+
+def test_matmul_cost_dequantizes_once_per_invocation_not_per_row() -> None:
+    one = matmul_cost(channels_in=8, channels_out=8, rows=1, weight_bytes=40)
+    many = matmul_cost(channels_in=8, channels_out=8, rows=64, weight_bytes=40)
+    assert one["bytes", "primal", "matmul"].sum() - 4 * 16 == 40
+    assert many["bytes", "primal", "matmul"].sum() - 4 * 64 * 16 == 40
+    dq = matmul_cost(
+        channels_in=8,
+        channels_out=8,
+        rows=3,
+        weight_bytes=40,
+        dequant_flops=5,
+    )
+    assert dq["flops", "primal", "elementwise"].sum() == 5 * 8 * 8
+
+
+def test_matmul_cost_rejects_dequant_without_a_packed_weight() -> None:
+    with pytest.raises(ValueError, match="weight_bytes"):
+        matmul_cost(channels_in=2, channels_out=3, dequant_flops=1)
+
+
+def test_packed_weight_moves_decode_toward_the_memory_roofline() -> None:
+    dense = matmul_cost(channels_in=4096, channels_out=4096, dtype=BF)
+    packed = matmul_cost(
+        channels_in=4096,
+        channels_out=4096,
+        dtype=BF,
+        weight_bytes=4096 * 4096 * 5 // 16,
+    )
+    dense_bytes = dense["bytes", "primal"].sum()
+    packed_bytes = packed["bytes", "primal"].sum()
+    assert packed_bytes * 6 < dense_bytes
+
+
+@pytest.mark.parametrize("rows", [1.5])
+def test_matmul_cost_rejects_fractional_execution_rows(rows: object) -> None:
     with pytest.raises(TypeError, match="integer"):
-        matmul_cost(channels_in=2, channels_out=3, rows=cast(int, _FRACTIONAL))
+        matmul_cost(channels_in=2, channels_out=3, rows=cast(int, rows))
 
 
 def test_dtype_defaults_to_the_torch_default() -> None:
@@ -336,20 +406,22 @@ def test_reduction_in_the_adjoint_phase() -> None:
     assert c["flops", "primal", "reduction", F32] == 0
 
 
-@pytest.mark.parametrize(
-    "call",
-    [
-        lambda: matmul_cost(channels_in=2, channels_out=3, rows=cast(int, _FRACTIONAL)),
-        lambda: elementwise_cost(primal=cast(int, _FRACTIONAL), adjoint=1),
-        lambda: reduction_cost(input_elements=cast(int, _FRACTIONAL)),
-        lambda: traffic("primal", "elementwise", elements=cast(int, _FRACTIONAL)),
-        lambda: Cost().tile(cast(int, _FRACTIONAL)),
-        lambda: Cost().tile(1, copies=cast(int, _FRACTIONAL)),
-    ],
-)
-def test_primitives_reject_fractional_geometry(call: Callable[[], object]) -> None:
+GEOMETRY_PRIMITIVES: Final[list[Callable[[int], Cost]]] = [
+    lambda n: matmul_cost(channels_in=2, channels_out=3, rows=n),
+    lambda n: elementwise_cost(primal=n, adjoint=1),
+    lambda n: reduction_cost(input_elements=n),
+    lambda n: traffic("primal", "elementwise", elements=n),
+    lambda n: Cost().tile(repetitions=n),
+    lambda n: Cost().tile(1, copies=n),
+]
+
+
+@pytest.mark.parametrize("primitive", GEOMETRY_PRIMITIVES)
+def test_primitives_reject_fractional_geometry(
+    primitive: Callable[[int], Cost],
+) -> None:
     with pytest.raises(TypeError, match="integer"):
-        call()
+        primitive(cast(int, cast(object, 1.5)))
 
 
 @pytest.mark.parametrize("rows", [0, -1, math.nan, math.inf])
@@ -368,7 +440,9 @@ def test_equal_costs_hash_alike_and_zero_cells_do_not_change_the_hash() -> None:
         params=3,
     )
     assert hash(a) == hash(b)
-    assert hash(a) != hash(Cost(cells={("flops", "primal", "matmul", BF): 2}))
+    assert hash(a) != hash(
+        Cost(cells={("flops", "primal", "matmul", BF): 2}),
+    )
 
 
 def test_repr_is_a_grid_with_totals() -> None:
@@ -405,7 +479,12 @@ def test_repr_intensity_total_divides_totals_instead_of_adding_ratios() -> None:
         },
     )
     assert repr(c).splitlines()[-1].split() == ["total", "180", "16", "11.25"]
-    assert repr(c[BF]).splitlines()[-1].split() == ["total", "180", "16", "11.25"]
+    assert repr(c[BF]).splitlines()[-1].split() == [
+        "total",
+        "180",
+        "16",
+        "11.25",
+    ]
     assert repr(c["primal"]).splitlines()[-1].split() == ["matmul", "60", "4", "15"]
 
 
@@ -509,6 +588,45 @@ def test_peak_prices_matmul_per_dtype_and_every_other_silo_at_the_vector_rate() 
 def test_peak_intensity_is_the_ridge() -> None:
     assert peak()["b200", "matmul", "fp4", "intensity"] == 9000 / 8
     assert peak()["rtx5090", "elementwise", F32, "intensity"] == 104.8 / 1.792
+
+
+def test_peak_names_a_form_factor_without_moving_the_bare_name() -> None:
+    # A bare name keeps meaning the form factor the table was sourced from, so
+    # every recorded result is unchanged by the form-factor entries existing.
+    # The table holds TB/s: 2.039 * 1e12 rounds to 2039000000000.0002, not 2.039e12.
+    assert peak()["a100", BF, "bytes", "matmul"] == 2.039 * 1e12
+    assert peak()["h100", BF, "bytes", "matmul"] == 3.35e12
+    # The PCIe boards move less memory, and compute is identical across forms.
+    assert peak()["a100-40g", BF, "bytes", "matmul"] == 1.555e12
+    assert peak()["a100-80g-pcie", BF, "bytes", "matmul"] == 1.555e12
+    assert peak()["h100-pcie", BF, "bytes", "matmul"] == 2.0e12
+    assert (
+        peak()["a100-40g", BF, "flops", "matmul"]
+        == peak()["a100", BF, "flops", "matmul"]
+    )
+    assert (
+        peak()["h100-pcie", BF, "flops", "matmul"]
+        == peak()["h100", BF, "flops", "matmul"]
+    )
+    assert (
+        peak()["h100-pcie", BF, "flops", "elementwise"]
+        == peak()["h100", BF, "flops", "elementwise"]
+    )
+
+
+def test_peak_ridge_moves_with_the_form_factor() -> None:
+    # The whole point of naming the form: the same model reads as differently
+    # tuned on the two boards, which is what picking the wrong ridge would hide.
+    sxm = peak()["h100", BF, "intensity", "matmul"]
+    pcie = peak()["h100-pcie", BF, "intensity", "matmul"]
+    assert sxm == 989 / 3.35
+    assert pcie == 989 / 2.0
+    # Sudoku exp000's transformer sits at intensity 272.
+    assert 272 / sxm - 1 == pytest.approx(-0.07866532, abs=1e-6)
+    assert 272 / pcie - 1 < -0.4
+    a100_sxm = peak()["a100", BF, "intensity", "matmul"]
+    a100_pcie = peak()["a100-40g", BF, "intensity", "matmul"]
+    assert a100_pcie / a100_sxm == pytest.approx(2.039 / 1.555)
 
 
 # -- dispatch ----------------------------------------------------------------
@@ -617,7 +735,11 @@ def test_a_partial_of_a_costed_function_keeps_its_cost() -> None:
         return torch.relu(x - threshold).square()
 
     bound = functools.partial(shifted, threshold=0.75)
-    assert cost(bound, channels=4, dtype=F32) == cost(shifted, channels=4, dtype=F32)
+    assert cost(bound, channels=4, dtype=F32) == cost(
+        shifted,
+        channels=4,
+        dtype=F32,
+    )
 
 
 def test_an_uncosted_function_is_rejected_by_name() -> None:
@@ -673,7 +795,9 @@ def test_every_model_config_is_priced() -> None:
         for name, owner in cast(dict[str, object], vars(module)).items():
             if type(owner) is not type or owner.__module__ != module_name:
                 continue
-            if not issubclass(owner, torch.nn.Module) or _is_attention_kernel(owner):
+            if not issubclass(owner, torch.nn.Module) or [
+                *inspect.signature(owner.forward).parameters,
+            ][1:4] == ["q", "k", "v"]:
                 continue
             config = getattr(owner, "Config", None)
             if not (inspect.isclass(config) and issubclass(config, Fig)):
@@ -681,12 +805,6 @@ def test_every_model_config_is_priced() -> None:
             if not hasattr(config, "cost"):
                 uncosted.append(f"{module_name}.{name}")
     assert uncosted == []
-
-
-def _is_attention_kernel(owner: type[torch.nn.Module]) -> bool:
-    """Whether ``owner`` is a kernel slot: called on ``(q, k, v)``, costed by its owner."""
-    forward = inspect.signature(owner.forward)
-    return [*forward.parameters][1:4] == ["q", "k", "v"]
 
 
 # -- leaves that exercise the silos ------------------------------------------

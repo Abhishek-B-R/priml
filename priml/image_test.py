@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from io import BytesIO
-from typing import TYPE_CHECKING, cast
+from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import platform
@@ -37,12 +38,8 @@ from priml.image import (
 )
 
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-
 def _jpeg_bytes(
-    size: tuple[int, int] = (50, 50),
+    size: tuple[int, int] = (50, 51),
     color: tuple[int, int, int] = (255, 0, 0),
     mode: str = "RGB",
 ) -> bytes:
@@ -63,7 +60,7 @@ def _noise_jpeg(*, width: int, height: int) -> bytes:
 
 
 def _png_bytes(
-    size: tuple[int, int] = (50, 50),
+    size: tuple[int, int] = (50, 51),
     color: tuple[int, int, int] = (0, 255, 0),
     mode: str = "RGB",
 ) -> bytes:
@@ -74,7 +71,7 @@ def _png_bytes(
 
 
 def _webp_bytes(
-    size: tuple[int, int] = (50, 50),
+    size: tuple[int, int] = (50, 51),
     color: tuple[int, int, int] = (0, 0, 255),
 ) -> bytes:
     img = Image.new("RGB", size, color)
@@ -92,7 +89,7 @@ class TestParseCrop:
         assert _parse_crop((10, 20, 30, 40), 100, 100) == (20, 10, 40, 30)
 
     def test_four_tuple_too_large(self) -> None:
-        assert _parse_crop((0, 0, 200, 200), 100, 100) is None
+        assert _parse_crop((0, 0, 200, 201), 100, 101) is None
 
     def test_center_crop_landscape(self) -> None:
         # Target 1:2 aspect on 100x100 square → crop to 50x100.
@@ -100,7 +97,7 @@ class TestParseCrop:
         assert crop == (0, 25, 100, 50)
 
     def test_center_crop_skipped_when_both_axes_larger(self) -> None:
-        assert _parse_crop((200, 200), 100, 100) is None
+        assert _parse_crop((200, 201), 100, 101) is None
 
 
 class TestGetMime:
@@ -114,7 +111,7 @@ class TestGetMime:
         assert get_mime(_webp_bytes()) == "image/webp"
 
     def test_gif(self) -> None:
-        img = Image.new("RGB", (5, 5))
+        img = Image.new("RGB", (2, 3))
         buf = BytesIO()
         img.save(buf, format="GIF")
         assert get_mime(buf.getvalue()) == "image/gif"
@@ -160,20 +157,20 @@ class TestGetDimensions:
 class TestDecodeJpegTurbojpeg:
     def test_success(self) -> None:
         mock_turbo = MagicMock()
-        mock_turbo.decode.return_value = np.ones((10, 10, 3), dtype=np.uint8) * 128
-        arr = decode_jpeg_turbojpeg(b"fake", cast(TurboJPEG, mock_turbo), 10, 10)
+        mock_turbo.decode.return_value = np.ones((10, 12, 3), dtype=np.uint8) * 128
+        arr = decode_jpeg_turbojpeg(b"fake", cast(TurboJPEG, mock_turbo), 10, 12)
         assert arr is not None
-        assert arr.shape == (10, 10, 3)
+        assert arr.shape == (10, 12, 3)
         assert arr.dtype == np.uint8
 
     def test_bgr_to_rgb(self) -> None:
         mock_turbo = MagicMock()
-        bgr = np.zeros((2, 2, 3), dtype=np.uint8)
+        bgr = np.zeros((2, 4, 3), dtype=np.uint8)
         bgr[:, :, 0] = 10  # B.
         bgr[:, :, 1] = 20  # G.
         bgr[:, :, 2] = 30  # R.
         mock_turbo.decode.return_value = bgr
-        arr = decode_jpeg_turbojpeg(b"fake", cast(TurboJPEG, mock_turbo), 2, 2)
+        arr = decode_jpeg_turbojpeg(b"fake", cast(TurboJPEG, mock_turbo), 2, 4)
         assert arr is not None
         # After flip, channels should be R, G, B → [30, 20, 10].
         assert arr[0, 0, 0] == 30
@@ -182,7 +179,7 @@ class TestDecodeJpegTurbojpeg:
 
     @pytest.mark.parametrize(
         "box",
-        [(0, 0, 20, 20), (5, 13, 17, 29), (10, 34, 30, 30), (39, 63, 1, 1)],
+        [(0, 0, 20, 21), (5, 13, 17, 29), (10, 34, 30, 31), (39, 63, 1, 2)],
         ids=["origin", "unaligned-left", "flush-right", "single-pixel"],
     )
     def test_crop_matches_a_full_decode_sliced(
@@ -204,7 +201,7 @@ class TestDecodeJpegTurbojpeg:
 
     @pytest.mark.parametrize(
         "box",
-        [(0, 0, 0, 10), (0, 0, 10, 0), (70, 0, 10, 10), (0, 45, 10, 10)],
+        [(0, 0, 0, 10), (0, 0, 10, 0), (70, 0, 10, 11), (0, 45, 10, 11)],
         ids=["zero-width", "zero-height", "past-right", "past-bottom"],
     )
     def test_a_region_with_no_pixels_is_none(
@@ -319,39 +316,6 @@ class TestDecodeJpegTurbojpeg:
         assert arr is not None
         np.testing.assert_array_equal(arr, fast[y : y + h, x : x + w])
 
-    def test_region_decoder_falls_back_to_the_default_lib_paths(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Off the linker path (Homebrew on Apple Silicon), look where PyTurboJPEG does."""
-        lib = tmp_path / "libturbojpeg.dylib"
-        lib.touch()
-        paths = [str(tmp_path / "missing" / lib.name), str(lib)]
-        _libturbojpeg.cache_clear()
-        try:
-            with (
-                patch("priml.image.find_library", return_value=None),
-                patch.dict(DEFAULT_LIB_PATHS, {platform.system(): paths}),
-                patch("priml.image.ctypes.CDLL") as cdll,
-            ):
-                _libturbojpeg()
-            cdll.assert_called_once_with(str(lib))
-        finally:
-            _libturbojpeg.cache_clear()
-
-    def test_region_decoder_without_a_library_raises(self, tmp_path: Path) -> None:
-        missing = str(tmp_path / "libturbojpeg.dylib")
-        _libturbojpeg.cache_clear()
-        try:
-            with (
-                patch("priml.image.find_library", return_value=None),
-                patch.dict(DEFAULT_LIB_PATHS, {platform.system(): [missing]}),
-                pytest.raises(OSError, match="libturbojpeg not found"),
-            ):
-                _libturbojpeg()
-        finally:
-            _libturbojpeg.cache_clear()
-
     def test_decode_error(self) -> None:
         mock_turbo = MagicMock()
         mock_turbo.decode.side_effect = RuntimeError("decode failed")
@@ -377,7 +341,7 @@ class TestDecodeWebpLibwebp:
 
     def test_happy_path(self) -> None:
         # Mock the webp cffi layer to reach the rgb extraction branch.
-        rgb_bytes = b"\x10\x20\x30" * (10 * 10)
+        rgb_bytes = b"\x10\x20\x30" * (10 * 12)
         with patch("priml.image.webp") as mock_webp:
             config = MagicMock()
             mock_webp.WebPDecoderConfig.return_value = config
@@ -387,17 +351,17 @@ class TestDecodeWebpLibwebp:
             mock_webp.lib.WebPDecode.return_value = 0  # OK.
             config.output.u.RGBA.size = len(rgb_bytes)
             mock_webp.ffi.buffer.return_value = rgb_bytes
-            arr = decode_webp_libwebp(b"x", 10, 10)
+            arr = decode_webp_libwebp(b"x", 10, 12)
         assert arr is not None
-        assert arr.shape == (10, 10, 3)
+        assert arr.shape == (10, 12, 3)
 
 
 class TestDecodeImagePil:
     def test_jpg(self) -> None:
-        data = _jpeg_bytes(size=(20, 20), color=(255, 0, 0))
-        arr = decode_image_pil(data, 20, 20)
+        data = _jpeg_bytes(size=(24, 20), color=(255, 0, 0))
+        arr = decode_image_pil(data, 20, 24)
         assert arr is not None
-        assert arr.shape == (20, 20, 3)
+        assert arr.shape == (20, 24, 3)
         assert arr.dtype == np.uint8
         # Tolerance for JPEG compression artifacts.
         assert arr[0, 0, 0] > 240
@@ -405,81 +369,81 @@ class TestDecodeImagePil:
         assert arr[0, 0, 2] < 15
 
     def test_png(self) -> None:
-        data = _png_bytes(size=(15, 15), color=(0, 255, 0))
-        arr = decode_image_pil(data, 15, 15)
+        data = _png_bytes(size=(16, 15), color=(0, 255, 0))
+        arr = decode_image_pil(data, 15, 16)
         assert arr is not None
-        assert arr.shape == (15, 15, 3)
+        assert arr.shape == (15, 16, 3)
         pixel: np.ndarray = arr[0, 0]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
         np.testing.assert_array_equal(pixel, [0, 255, 0])
 
     def test_rgba_to_rgb(self) -> None:
-        img = Image.new("RGBA", (10, 10), (100, 150, 200, 128))
+        img = Image.new("RGBA", (12, 10), (100, 150, 200, 128))
         buf = BytesIO()
         img.save(buf, format="PNG")
-        arr = decode_image_pil(buf.getvalue(), 10, 10)
+        arr = decode_image_pil(buf.getvalue(), 10, 12)
         assert arr is not None
-        assert arr.shape == (10, 10, 3)
+        assert arr.shape == (10, 12, 3)
 
     def test_rgba_output(self) -> None:
-        img = Image.new("RGBA", (10, 10), (100, 150, 200, 128))
+        img = Image.new("RGBA", (12, 10), (100, 150, 200, 128))
         buf = BytesIO()
         img.save(buf, format="PNG")
-        arr = decode_image_pil(buf.getvalue(), 10, 10, channels_format="rgba")
+        arr = decode_image_pil(buf.getvalue(), 10, 12, channels_format="rgba")
         assert arr is not None
-        assert arr.shape == (10, 10, 4)
+        assert arr.shape == (10, 12, 4)
         pixel: np.ndarray = arr[0, 0]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
         np.testing.assert_array_equal(pixel, [100, 150, 200, 128])
 
     def test_grayscale_to_rgb(self) -> None:
-        img = Image.new("L", (10, 10), 128)
+        img = Image.new("L", (12, 10), 128)
         buf = BytesIO()
         img.save(buf, format="PNG")
-        arr = decode_image_pil(buf.getvalue(), 10, 10)
+        arr = decode_image_pil(buf.getvalue(), 10, 12)
         assert arr is not None
-        assert arr.shape == (10, 10, 3)
+        assert arr.shape == (10, 12, 3)
 
     def test_with_crop(self) -> None:
-        data = _png_bytes(size=(40, 40), color=(50, 100, 150))
-        arr = decode_image_pil(data, 40, 40, crop=(0, 0, 20, 20))
+        data = _png_bytes(size=(48, 40), color=(50, 100, 150))
+        arr = decode_image_pil(data, 40, 48, crop=(0, 0, 20, 24))
         assert arr is not None
-        assert arr.shape == (20, 20, 3)
+        assert arr.shape == (20, 24, 3)
 
     def test_jpeg_crop_triggers_draft_mode(self) -> None:
         # JPEG + crop path exercises PIL's draft mode (decode at reduced
         # DCT resolution). PIL may draft to a smaller size, scaling the
         # crop accordingly -- shape is smaller than the logical crop size.
-        data = _jpeg_bytes(size=(200, 200), color=(80, 120, 200))
-        arr = decode_image_pil(data, 200, 200, crop=(0, 0, 50, 50))
+        data = _jpeg_bytes(size=(240, 200), color=(80, 120, 200))
+        arr = decode_image_pil(data, 200, 240, crop=(0, 0, 50, 51))
         assert arr is not None
         # Square crop, 3 channels, no particular size (draft-dependent).
         assert arr.ndim == 3
         assert arr.shape[2] == 3
-        assert arr.shape[0] == arr.shape[1]
-        assert arr.shape[0] <= 50  # Never larger than requested crop.
+        assert arr.shape[0] <= 50  # Never larger than requested crop height.
+        assert arr.shape[1] <= 51  # Never larger than requested crop width.
 
     def test_rgba_output_from_grayscale(self) -> None:
         # Grayscale → RGBA path: non-RGBA input + channels_format="rgba".
-        img = Image.new("L", (10, 10), 128)
+        img = Image.new("L", (12, 10), 128)
         buf = BytesIO()
         img.save(buf, format="PNG")
-        arr = decode_image_pil(buf.getvalue(), 10, 10, channels_format="rgba")
+        arr = decode_image_pil(buf.getvalue(), 10, 12, channels_format="rgba")
         assert arr is not None
-        assert arr.shape == (10, 10, 4)
+        assert arr.shape == (10, 12, 4)
 
     def test_error_on_invalid(self) -> None:
         assert decode_image_pil(b"not-image", 10, 10) is None
 
     def test_writable(self) -> None:
         # Ensure returned array is writable (torch.from_numpy warns otherwise).
-        data = _png_bytes()
-        arr = decode_image_pil(data, 50, 50)
+        data = _png_bytes(size=(56, 50))
+        arr = decode_image_pil(data, 50, 56)
         assert arr is not None
         assert arr.flags.writeable
 
 
 class TestResizeImage:
     def test_small_image_unchanged(self) -> None:
-        data = _png_bytes(size=(100, 100))
+        data = _png_bytes(size=(10, 11))
         out, mime = resize(data)
         assert out == data
         assert mime == "image/png"
@@ -562,7 +526,7 @@ class TestResizeImage:
         re-encode. 0 must mean "no byte cap" -- pass the bytes through
         (subject only to ``max_dim``).
         """
-        data = _png_bytes(size=(16, 16))
+        data = _png_bytes(size=(4, 5))
         out, _ = resize(data, max_dim=0, max_bytes=0)
         assert out == data  # Untouched: no dim cap, no byte cap.
 
@@ -604,12 +568,12 @@ class TestResizeImage:
 
 class TestDecodeWebpReal:
     def test_roundtrip(self) -> None:
-        data = _webp_bytes(size=(30, 30), color=(10, 20, 30))
-        arr = decode_webp_libwebp(data, 30, 30)
+        data = _webp_bytes(size=(32, 30), color=(10, 20, 30))
+        arr = decode_webp_libwebp(data, 30, 32)
         if arr is None:
             pytest.skip("libwebp decode failed in this environment")
         assert arr is not None
-        assert arr.shape == (30, 30, 3)
+        assert arr.shape == (30, 32, 3)
         assert arr.dtype == np.uint8
         # WebP lossy compression, allow tolerance.
         red = int(arr[0, 0, 0])  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
@@ -620,18 +584,52 @@ class TestDecodeWebpReal:
         assert abs(blue - 30) < 10
 
     def test_with_crop(self) -> None:
-        data = _webp_bytes(size=(60, 60))
-        arr = decode_webp_libwebp(data, 60, 60, crop=(0, 0, 30, 30))
+        data = _webp_bytes(size=(64, 60))
+        arr = decode_webp_libwebp(data, 60, 64, crop=(0, 0, 30, 32))
         if arr is None:
             pytest.skip("libwebp crop unavailable")
         assert arr is not None
-        assert arr.shape == (30, 30, 3)
+        assert arr.shape == (30, 32, 3)
 
 
 @patch("priml.image.webp")
 def test_webp_init_failure(mock_webp: MagicMock) -> None:
     mock_webp.lib.WebPInitDecoderConfig.return_value = False
     assert decode_webp_libwebp(b"x", 10, 10) is None
+
+
+def _find_nothing(name: str) -> str | None:
+    del name
+    return None
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_libturbojpeg_falls_back_to_pyturbojpeg_install_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    installed: bool,
+) -> None:
+    # find_library misses Homebrew's prefix on Apple silicon. On Linux it returns a
+    # soname rather than a path, so the real library comes from the install paths
+    # (CI links it into /usr/local/lib).
+    system = platform.system()
+    paths = ["/nonexistent/libturbojpeg"]
+    if installed:
+        real = [p for p in DEFAULT_LIB_PATHS[system] if Path(p).exists()]
+        assert real, "libturbojpeg is not at any of PyTurboJPEG's install paths"
+        paths.append(real[0])
+    monkeypatch.setattr("priml.image.find_library", _find_nothing)
+    monkeypatch.setattr("priml.image.DEFAULT_LIB_PATHS", {system: paths})
+    _libturbojpeg.cache_clear()
+    try:
+        if installed:
+            region = decode_jpeg_turbojpeg_region(_jpeg_bytes(), x=0, y=0, w=8, h=8)
+            assert region is not None
+            assert region.shape == (8, 8, 3)
+        else:
+            with pytest.raises(OSError, match="not found"):
+                _libturbojpeg()
+    finally:
+        _libturbojpeg.cache_clear()
 
 
 if __name__ == "__main__":

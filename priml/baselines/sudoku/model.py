@@ -145,6 +145,15 @@ class ForwardOutput(NamedTuple):
     """Per-cycle logits when the caller asked for intermediates."""
 
 
+type CompileMode = Literal[
+    "default",
+    "reduce-overhead",
+    "max-autotune",
+    "max-autotune-no-cudagraphs",
+]
+"""The ``torch.compile`` modes a core compile accepts."""
+
+
 class CoreCompile:
     """Compile the recurrence's hot loop with ``torch.compile``.
 
@@ -160,12 +169,7 @@ class CoreCompile:
         unit: Literal["core", "reasoning"] = "core"
         """``core`` traces one core application; ``reasoning`` one block pass."""
 
-        mode: Literal[
-            "default",
-            "reduce-overhead",
-            "max-autotune",
-            "max-autotune-no-cudagraphs",
-        ] = "default"
+        mode: CompileMode = "default"
         """``torch.compile`` mode."""
 
         fullgraph: bool = True
@@ -488,7 +492,7 @@ class SudokuNet(nn.Module):
         """Blocks in the reasoning stack, applied per core application."""
 
         embedding: GridConfig = field(default_factory=GridEmbedding.Config)
-        """Input embedding: tokens plus whatever additive channels_in apply."""
+        """Input embedding: tokens plus whatever additive channels apply."""
 
         block: Makeable[TensorModule] = field(
             default_factory=lambda: TransformerBlock.Config(prenorm=False),
@@ -523,7 +527,7 @@ class SudokuNet(nn.Module):
         logits, and one that overcounts strips nothing and shifts every
         position. No prefix means 0."""
 
-        vocab_size: int = 11
+        vocab_size: int = -1
         """Output vocabulary; must match the embedding's."""
 
         halt_outputs: int = 2
@@ -685,11 +689,19 @@ class SudokuNet(nn.Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
+        if config.vocab_size < 1:
+            raise ValueError("SudokuNet requires vocab_size from the dataset.")
+        if config.embedding.grid_len < 1:
+            raise ValueError(
+                "SudokuNet requires embedding grid_shape from the dataset.",
+            )
+        if config.rope is not None and not config.rope_grid_shape:
+            raise ValueError("SudokuNet requires rope_grid_shape from the dataset.")
         self.config = config
         c = config.channels_in
         # Registered first, filled after the blocks: parameter ORDER follows
-        # registration, and the legacy TRM held its prefix parameters directly, so
-        # they led. A norm over the body sums in that order, and a compiled float32
+        # registration, and the reference TRM held its prefix parameters directly,
+        # so they led. A norm over the body sums in that order, and a compiled float32
         # reduction lands a different last bit when the order changes.
         self.register_module("prefix", None)
         # Construction order fixes the global-RNG draw order, so a seeded init

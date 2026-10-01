@@ -22,12 +22,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import field
+from functools import cached_property
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Literal,
     NamedTuple,
     NotRequired,
+    Protocol,
     Self,
     TypedDict,
     cast,
@@ -36,6 +38,7 @@ from typing import (
 
 import hashlib
 import logging
+import re
 import struct
 
 from configgle import Fig, Makeable
@@ -46,7 +49,7 @@ import torch
 import torch.distributed as dist
 
 from priml.baselines.arcagi1.augmentation import (
-    ARC,
+    ArcSpec,
     ColorDihedral,
     arc_grid_to_np,
     crop_grid,
@@ -221,6 +224,66 @@ class SignalDumpPayload(NamedTuple):
     pass_ks: tuple[int, ...]
 
 
+class TaskScore(NamedTuple):
+    """One task's per-K count of test inputs solved under the pass@K ranking."""
+
+    solved: tuple[int, ...]
+    """Solved test inputs, one entry per configured ``pass_ks`` value."""
+
+    num_inputs: int
+    """Test inputs the task asks for."""
+
+
+class ScoringRule(Protocol):
+    """Turns per-task pass@K counts into one reported score per K."""
+
+    name: str
+    """Metric prefix; each score is reported as ``"{name}@{k}"``."""
+
+    def __call__(self, tasks: Sequence[TaskScore], k_index: int) -> float:
+        """Score the ``k_index``-th K over every scored task."""
+        ...
+
+
+class StrictPass:
+    """Fraction of tasks with every test input solved: the official ARC Prize rule."""
+
+    class Config(Fig["StrictPass"]):
+        """Reported as ``strict@K``."""
+
+        name: str = "strict"
+        """Metric prefix."""
+
+    def __init__(self, config: Config) -> None:
+        self.name = config.name
+
+    def __call__(self, tasks: Sequence[TaskScore], k_index: int) -> float:
+        """Return the all-inputs-solved task fraction at one K."""
+        solved = sum(
+            task.num_inputs > 0 and task.solved[k_index] == task.num_inputs
+            for task in tasks
+        )
+        return solved / max(1, len(tasks))
+
+
+class PerOutputPass:
+    """Solved test inputs over all test inputs, pooled across tasks."""
+
+    class Config(Fig["PerOutputPass"]):
+        """Reported as ``per_output@K``."""
+
+        name: str = "per_output"
+        """Metric prefix."""
+
+    def __init__(self, config: Config) -> None:
+        self.name = config.name
+
+    def __call__(self, tasks: Sequence[TaskScore], k_index: int) -> float:
+        """Return the pooled solved-input fraction at one K."""
+        solved = sum(task.solved[k_index] for task in tasks)
+        return solved / max(1, sum(task.num_inputs for task in tasks))
+
+
 class CanonicalPassK:
     """TRM reference pass@K over canonical test inputs, task-normalized.
 
@@ -257,37 +320,69 @@ class CanonicalPassK:
         per_step_acts: int = 0
         """Per-ACT-step signal columns in a wide model output; 0 for none."""
 
+        spec: ArcSpec = field(default_factory=ArcSpec)
+        """Prepared dataset's packed-grid geometry and vocabulary."""
+
         transform: Makeable[ColorDihedral] = field(default_factory=ColorDihedral.Config)
         """Color/dihedral policy that encoded the prepared identifiers."""
 
+        rules: list[Makeable[ScoringRule]] = field(
+            default_factory=list[Makeable[ScoringRule]],
+        )
+        """Extra per-task scoring rules, each reported beside ``pass@K``."""
+
+        exclude_tasks: list[str] = field(default_factory=list[str])
+        """Tasks dropped before scoring, shrinking every denominator."""
+
         @override
         def finalize(self) -> Self:
+            if (
+                isinstance(self.transform, ColorDihedral.Config)
+                and not self.transform.separator
+            ):
+                self.transform.separator = self.spec.puzzle_id_separator
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
         self.config = config
         self._transform = config.transform.make()
-        root = Path(config.working_dir).expanduser()
-        self._identifier_map = ListCodec.coerce(
-            loads((root / "identifiers.json").read_text()),
+        self._root = Path(config.working_dir).expanduser()
+        self._rules: list[ScoringRule] = [rule.make() for rule in config.rules]
+        self.reset()
+
+    # Read on first use: the loop builds metrics before the dataset, which is what
+    # stages this tree on a fresh machine.
+    @cached_property
+    def _identifier_map(self) -> list[str]:
+        """``identifiers.json``: index is puzzle id."""
+        return ListCodec.coerce(
+            loads((self._root / "identifiers.json").read_text()),
             str,
         )
-        self._test_puzzles = {
+
+    @cached_property
+    def _test_puzzles(self) -> dict[str, dict[str, object]]:
+        """Scored tasks from ``test_puzzles.json``, minus ``exclude_tasks``."""
+        excluded = set(self.config.exclude_tasks)
+        return {
             name: DictCodec.coerce(puzzle)
             for name, puzzle in DictCodec.coerce(
-                loads((root / "test_puzzles.json").read_text()),
+                loads((self._root / "test_puzzles.json").read_text()),
             ).items()
+            if name not in excluded
         }
-        # The same blank id the loader pads with, so the two never desync.
-        meta_path = root / "test" / "dataset.json"
+
+    @cached_property
+    def _blank_identifier_id(self) -> int:
+        """The id the loader pads with, so the two never desync."""
+        meta_path = self._root / "test" / "dataset.json"
         meta = (
             DictCodec.coerce(loads(meta_path.read_text()))
             if meta_path.is_file()
             else {}
         )
-        self._blank_identifier_id = IntCodec.coerce(meta.get("blank_identifier_id", 0))
-        self.reset()
+        return IntCodec.coerce(meta.get("blank_identifier_id", 0))
 
     def reset(self) -> None:
         """Drop every accumulated ballot and dump row."""
@@ -381,6 +476,7 @@ class CanonicalPassK:
                         pad_r=pad_r,
                         pad_c=pad_c,
                     ),
+                    spec=self.config.spec,
                 ),
             )
             input_h = grid_hash(input_canon)
@@ -392,6 +488,7 @@ class CanonicalPassK:
                         pad_r=pad_r,
                         pad_c=pad_c,
                     ),
+                    spec=self.config.spec,
                 ),
             )
             pred_h = grid_hash(pred_canon)
@@ -441,10 +538,12 @@ class CanonicalPassK:
                     for k in pass_ks
                 },
             )
+            empty.update(self._rule_scores([]))
             if self._dump_enabled:
                 empty["extras"] = {"signal_dump": self._signal_dump_payload()}
             return empty
         per_task_pass1: list[tuple[str, float]] = []
+        task_scores: list[TaskScore] = []
         pass1_idx = pass_ks.index(1) if 1 in pass_ks else None
         n_no_preds = 0
         for name, puzzle in self._test_puzzles.items():
@@ -456,8 +555,8 @@ class CanonicalPassK:
             }
             task_had_preds = False
             for pair in pairs:
-                input_h = grid_hash(_json_grid(pair["input"]))
-                label_h = grid_hash(_json_grid(pair["output"]))
+                input_h = grid_hash(_json_grid(pair["input"], spec=self.config.spec))
+                label_h = grid_hash(_json_grid(pair["output"], spec=self.config.spec))
                 records = preds.get(name, {}).get(input_h, [])
                 cap = self.config.max_views_per_input
                 if cap > 0 and len(records) > cap:
@@ -492,6 +591,7 @@ class CanonicalPassK:
                         if label_h in report_ranked[:k]:
                             per_test_report[rank_name][i] += 1
             n_test = len(pairs)
+            task_scores.append(TaskScore(tuple(per_test_correct), n_test))
             if n_test == 0:
                 continue
             if not task_had_preds:
@@ -513,6 +613,7 @@ class CanonicalPassK:
                     for i, k in enumerate(pass_ks)
                 },
             )
+        results.update(self._rule_scores(task_scores))
         self._log_per_task(results, per_task_pass1, n_test_puzzles, n_no_preds)
         if self._dump_enabled:
             results["extras"] = {"signal_dump": self._signal_dump_payload()}
@@ -554,6 +655,14 @@ class CanonicalPassK:
                 for ih, vs in by_input.items()
             }
             for name, by_input in state.get("preds", {}).items()
+        }
+
+    def _rule_scores(self, tasks: Sequence[TaskScore]) -> dict[str, float]:
+        """Score every configured rule at every K."""
+        return {
+            f"{rule.name}@{k}": rule(tasks, index)
+            for rule in self._rules
+            for index, k in enumerate(self.config.pass_ks)
         }
 
     def _signal_dump_payload(self) -> SignalDumpPayload:
@@ -638,12 +747,31 @@ class SignalDumpTracker:
         working_dir: Path | str = "/signals_{global_step}.npz"
         """Logical destination; ``{global_step}`` is formatted at write time."""
 
+        spec: ArcSpec = field(default_factory=ArcSpec)
+        """Prepared dataset's packed-grid geometry."""
+
+        keep_last_n: int = -1
+        """Newest step-stamped dumps kept after each write; ``-1`` keeps all.
+
+        Rotation deletes files an offline analysis may still want: copy a dump
+        out of the run directory to pin it, or archive with ``keep_every``."""
+
+        keep_every: int = 0
+        """Never delete a dump whose step is a multiple of this; ``0`` is off."""
+
         @override
         def finalize(self) -> Self:
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
+        if config.keep_last_n < -1 or config.keep_last_n == 0:
+            raise ValueError(
+                "keep_last_n must be -1 (keep all) or positive; got "
+                f"{config.keep_last_n}.",
+            )
+        if config.keep_every < 0:
+            raise ValueError(f"keep_every must be >= 0; got {config.keep_every}.")
         self.config = config
 
     def log_metrics(
@@ -689,7 +817,32 @@ class SignalDumpTracker:
             payload=payload,
             dump_signals_path=str(self.config.working_dir),
             global_step=step,
+            spec=self.config.spec,
         )
+        self._prune()
+
+    def _prune(self) -> None:
+        """Delete the oldest step-stamped dumps beyond ``keep_last_n``, on rank 0."""
+        template = str(self.config.working_dir)
+        if self.config.keep_last_n < 0 or "{global_step}" not in template:
+            return
+        if not is_rank_zero():
+            return
+        path = Path(template).expanduser()
+        pattern = re.compile(
+            re.escape(path.name).replace(re.escape("{global_step}"), r"(\d+)"),
+        )
+        dumps = sorted(
+            (int(match.group(1)), candidate)
+            for candidate in path.parent.glob(path.name.replace("{global_step}", "*"))
+            if (match := pattern.fullmatch(candidate.name))
+        )
+        every = self.config.keep_every
+        for step, doomed in dumps[: max(0, len(dumps) - self.config.keep_last_n)]:
+            if every > 0 and step % every == 0:
+                continue
+            doomed.unlink()
+            logger.info("Deleted signal dump %s (keep_last_n rotation).", doomed)
 
     def log_images(self, key: str, images: list[object], step: int) -> None:
         """Ignore images; this tracker writes only the signal dump."""
@@ -708,6 +861,7 @@ def write_signal_dump(
     payload: SignalDumpPayload,
     dump_signals_path: str | Path,
     global_step: int,
+    spec: ArcSpec,
 ) -> None:
     """Gather every rank's dump and write it as one ``.npz`` from rank 0.
 
@@ -715,6 +869,7 @@ def write_signal_dump(
       payload: This rank's rows, unique prediction grids, and step rows.
       dump_signals_path: A ``Path`` is literal; a ``str`` formats ``{global_step}``.
       global_step: Step substituted into a ``str`` path.
+      spec: Dataset-owned packed-grid geometry.
 
     """
     if isinstance(dump_signals_path, Path):
@@ -763,7 +918,7 @@ def write_signal_dump(
         n_rows[j] = nr
         n_cols[j] = nc
     n_pred = len(pred_table)
-    pred_grids = np.zeros((n_pred, ARC.max_grid, ARC.max_grid), dtype=np.uint8)
+    pred_grids = np.zeros((n_pred, spec.max_grid, spec.max_grid), dtype=np.uint8)
     pred_n_rows = np.zeros(n_pred, dtype=np.uint8)
     pred_n_cols = np.zeros(n_pred, dtype=np.uint8)
     for pid, pred_h in enumerate(pred_table):
@@ -925,9 +1080,9 @@ def _floats(values: Tensor) -> list[float]:
     return ListCodec.coerce(values.tolist(), float)
 
 
-def _json_grid(value: object) -> NDArray[np.uint8]:
+def _json_grid(value: object, *, spec: ArcSpec) -> NDArray[np.uint8]:
     rows = [ListCodec.coerce(row, int) for row in ListCodec.coerce(value)]
-    return arc_grid_to_np(rows, max_grid=ARC.max_grid)
+    return arc_grid_to_np(rows, max_grid=spec.max_grid)
 
 
 def _shape(grid: NDArray[np.uint8]) -> tuple[int, int]:

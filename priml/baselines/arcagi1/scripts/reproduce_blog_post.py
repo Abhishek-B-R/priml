@@ -5,8 +5,8 @@
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
 Reproduce the ARC-AGI-1 blog-post experiment with public Priml.
 
-The blog post's model is exp008, the HPS bundle recipe (QK-norm, prediction
-feedback, corrupted-feedback repair over the URM). From the Priml repository
+The blog post's model is exp008: QK-norm, prediction feedback, and
+corrupted-feedback repair over the URM. From the Priml repository
 root, set up the environment and exp008 data:
   uv sync --all-groups
   priml/baselines/arcagi1/scripts/prepare_data.py --experiment exp008
@@ -45,6 +45,7 @@ import os
 
 from priml.baselines.arcagi1.act import AtomicPool
 from priml.baselines.arcagi1.experiments import TrmTrainLoop, exp008
+from priml.baselines.arcagi1.model import from_reference_name
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.runtime import SingleProcess
 from priml.train.checkpointer import Checkpointer
@@ -153,19 +154,12 @@ def overlay(
       into: The updated state.
 
     """
-    renames = {
-        "embed_tokens.weight": "embedding.embed_tokens.weight",
-        "embed_feedback": "embedding.channels.0.embed_feedback",
-        "q_head.weight": "halt_head.weight",
-        "q_head.bias": "halt_head.bias",
-        "puzzle_emb.weights": "prefix.weights",
-    }
     old = cast("dict[str, object]", archive["step"])
     fresh = cast("dict[str, object]", into["step"])
     source = cast("dict[str, torch.Tensor]", old["model"])
     old_ema = cast("dict[str, torch.Tensor]", old["ema"])
-    fresh["model"] = {renames.get(name, name): value for name, value in source.items()}
-    ema = {renames.get(name, name): value for name, value in old_ema.items()}
+    fresh["model"] = {from_reference_name(k): v for k, v in source.items()}
+    ema = {from_reference_name(k): v for k, v in old_ema.items()}
     fresh["ema"] = {"shadow_params": ema, "global_step": steps}
     fresh["timer_step"] = {"global_count": steps, "global_sec": 0.0}
     return into
