@@ -143,6 +143,7 @@ Thumbs.db
 
 # ML artifacts (weights, datasets, runs). Never commit generated bulk data;
 # keep only source and small deterministic fixtures.
+.scratch/
 wandb/
 *.npz
 *.npy
