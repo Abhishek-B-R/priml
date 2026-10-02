@@ -277,9 +277,7 @@ class _ForecastBatches:
             }
 
         if self.consume_test_loader_seed:
-            # The original evaluates its ordered test loader after validation.
-            # Its iterator consumes a base seed even though test metrics do not
-            # affect training. Keep that draw before the next train shuffle.
+            # Keep the test-loader seed draw in the same place as the reference.
             _ = torch.empty((), dtype=torch.int64).random_().item()
         self._order = None
         self._position = 0

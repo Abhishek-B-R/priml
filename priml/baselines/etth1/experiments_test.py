@@ -1,3 +1,5 @@
+"""Tests for the ETTh1 experiment setup and training loop."""
+
 from pathlib import Path
 from typing import cast
 
@@ -58,7 +60,7 @@ def test_smoke_runs_end_to_end(tmp_path: Path) -> None:
     cfg = exp_smoke()
     cfg.base_dir = tmp_path
     cfg.dataset = fixture_config(tmp_path / "datasets/etth1")
-    # Explicit absolute path should remain its own resource root.
+    # An absolute path should stay unchanged.
     cfg.dataset.base_dir = "/"
     loop = cfg.make()
     loop.train()
@@ -115,7 +117,7 @@ def test_mid_epoch_resume_replays_exact_next_update(tmp_path: Path) -> None:
     try:
         first = loop._get_next_batch()
         loop._do_train_step(first)
-        # torch.save snapshots tensor storage; state_dict itself is a live view.
+        # Copy the state because state_dict values are live views.
         checkpoint = tmp_path / "resume.pt"
         torch.save(loop.state_dict(), checkpoint)
         batch = loop._get_next_batch()

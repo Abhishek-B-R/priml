@@ -61,7 +61,7 @@ class Etth1TrainStep(TrainStep):
     def __init__(self, config: Config) -> None:
         """Initialize with the reference DLinear Torch RNG stream."""
         if config.seed is not None:
-            # TrainLoop salts its Torch seed. The reference seeds Torch directly.
+            # The reference seeds Torch directly.
             torch.manual_seed(config.seed)
         super().__init__(config)
 

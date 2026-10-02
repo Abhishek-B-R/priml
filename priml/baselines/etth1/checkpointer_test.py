@@ -1,3 +1,5 @@
+"""Tests for ETTh1 checkpoint selection and resume behavior."""
+
 from pathlib import Path
 from typing import cast
 

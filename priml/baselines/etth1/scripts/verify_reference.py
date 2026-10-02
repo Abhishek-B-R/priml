@@ -3,7 +3,7 @@
 Reference-only dependencies belong in a separate validation environment:
 pandas, scikit-learn, and matplotlib. Native tests never import this source.
 """
-# ruff: noqa: S603, S607 -- Read-only git provenance queries on the explicit reference checkout.
+# ruff: noqa: S603, S607 -- Git only reads the reference checkout.
 
 from __future__ import annotations
 
@@ -205,7 +205,7 @@ def verify(reference: Path, directory: Path, *, mint: bool) -> dict[str, object]
             if portable:
                 portable_model, portable_training = source_model, source_training
 
-    # Canonical data and update parity use ordinary production float32 kernels.
+    # The real-data check uses the normal float32 path.
     torch.manual_seed(2021)
     args = reference_args(directory, tiny=False)
     recipe = experiments.Exp_Main(args)

@@ -111,8 +111,7 @@ def _flatten_state(record: dict[str, Tensor], prefix: str, value: object) -> Non
         record[prefix] = torch.tensor(value)
     elif isinstance(value, dict):
         for key, item in cast("Mapping[str | int, object]", value).items():
-            # PRIML's schedule anchor is metadata absent from the source Adam.
-            # Effective learning rates and every optimizer moment are retained.
+            # This metadata is PRIML-only; keep the optimizer values below it.
             if key == "initial_lr":
                 continue
             _flatten_state(record, f"{prefix}/{key}", item)

@@ -1,3 +1,5 @@
+"""Tests for ETTh1 validation metrics."""
+
 import numpy as np
 import pytest
 import torch

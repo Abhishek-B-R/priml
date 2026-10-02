@@ -228,8 +228,7 @@ class DLinear(nn.Module):
             config.pred_len,
         )
 
-        # Unused by forward, but the source registers it and consumes its
-        # initialization draws before creating the first data-loader iterator.
+        # Keep this unused layer because it affects the reference RNG sequence.
         self.decoder = nn.Linear(
             config.seq_len,
             config.pred_len,

@@ -1,3 +1,5 @@
+"""Tests for the ETTh1 training step."""
+
 from pathlib import Path
 from typing import Final, cast
 

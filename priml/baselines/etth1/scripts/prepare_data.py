@@ -1,5 +1,5 @@
 """Prepare the checksum-pinned public ETTh1 CSV before training."""
-# ruff: noqa: S310 -- The only URL is a fixed, pinned HTTPS dataset URL.
+# ruff: noqa: S310 -- This is one fixed HTTPS URL.
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def prepare(directory: Path, *, source: Path | None = None) -> Path:
     if source is not None:
         payload = source.read_bytes()
     else:
-        # This is a fixed HTTPS URL, never a user-supplied URL scheme.
+        # Only the pinned dataset URL is downloaded.
         with cast(
             HTTPResponse,
             urllib.request.urlopen(DATASET_URL, timeout=60),

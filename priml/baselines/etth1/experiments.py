@@ -105,8 +105,7 @@ class Etth1TrainLoop(TrainLoop):
     def _on_epoch_boundary(self) -> None:
         super()._on_epoch_boundary()
 
-        # Save after validation consumes its RNG and updates stopping history.
-        # A cadence save before iterator exhaustion would resume before that work.
+        # Save after validation so a resume starts after the full epoch.
         if self.checkpointer is not None and self.local_step > 0:
             self.checkpointer.save(self, self.step.global_step)
 
@@ -196,7 +195,7 @@ def exp000() -> Etth1TrainLoop.Config:
     cfg.metrics_eval[""] = ForecastMSE.Config()
 
     cfg.checkpointer = Etth1Checkpointer.Config()
-    # Epoch checkpoints are owned by the boundary hook, after validation.
+    # The epoch hook saves after validation.
     cfg.checkpointer.save_every = cfg.max_steps
     cfg.checkpointer.keep_last_n = 3
     cfg.checkpointer.best_metric = "total_loss"

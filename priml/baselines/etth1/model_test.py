@@ -1,3 +1,5 @@
+"""Tests for the ETTh1 DLinear model."""
+
 from pathlib import Path
 from typing import Final, cast
 
@@ -28,7 +30,7 @@ def test_model_golden_detects_one_ulp_change() -> None:
     with host_agnostic_numerics():
         torch.manual_seed(2021)
         model = tiny_config().model.make()
-    # Mutate outside the arithmetic-widening harness: one float32 ULP.
+    # Change one float32 ULP before recording the model.
     with torch.no_grad():
         value = model.seasonal.weight
         value[0, 0] = torch.nextafter(value[0, 0], torch.tensor(float("inf")))

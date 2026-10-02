@@ -35,6 +35,5 @@ class Etth1Checkpointer(Checkpointer):
         try:
             return super().on_eval(target, step, metrics)
         finally:
-            # A failed write must not erase the previously accepted score.
             if self.best_value in (float("inf"), -float("inf")):
                 self.best_value = previous
