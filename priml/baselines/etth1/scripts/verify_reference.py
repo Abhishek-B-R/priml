@@ -82,7 +82,16 @@ class _Tools(Protocol):
 
 
 def reference_args(directory: Path, *, tiny: bool) -> SimpleNamespace:
-    """Declare the source recipe, changing only dimensions for the tiny probe."""
+    """Declare the source recipe, changing only dimensions for the tiny probe.
+
+    Args:
+      directory: Directory containing the prepared ETTh1 CSV.
+      tiny: Whether to use the smaller geometry for the deterministic probe.
+
+    Returns:
+      args: Arguments consumed by the pinned upstream experiment and loader.
+
+    """
     return SimpleNamespace(
         seq_len=5 if tiny else 336,
         pred_len=3 if tiny else 96,
@@ -104,30 +113,6 @@ def reference_args(directory: Path, *, tiny: bool) -> SimpleNamespace:
         num_workers=0,
         batch_size=8,
     )
-
-
-def _canonical_names(record: Mapping[str, Tensor]) -> dict[str, Tensor]:
-    names = {
-        "Linear_Seasonal.": "seasonal.",
-        "Linear_Trend.": "trend.",
-        "Linear_Decoder.": "decoder.",
-    }
-    result: dict[str, Tensor] = {}
-    for key, value in record.items():
-        canonical = key
-        for source, target in names.items():
-            canonical = canonical.replace(source, target)
-        result[canonical] = value
-    return result
-
-
-def _require_equal(
-    expected: Mapping[str, Tensor],
-    actual: Mapping[str, Tensor],
-) -> None:
-    differences = mismatches(expected, actual)
-    if differences:
-        raise AssertionError("\n".join(differences))
 
 
 def verify(reference: Path, directory: Path, *, mint: bool) -> dict[str, object]:
@@ -187,21 +172,26 @@ def verify(reference: Path, directory: Path, *, mint: bool) -> dict[str, object]
             for index, batch in enumerate(tiny_batches()):
                 optimizer.zero_grad()
                 prediction = cast(Tensor, recipe.model(batch["media"]))
-                loss = cast(Tensor, criterion(prediction, batch["label"]))
+                loss = cast(Tensor, criterion(prediction, target=batch["label"]))
                 loss.backward()
                 optimizer.step()
                 source_training.update(
                     {
                         f"step{index + 1}/{key}": value
                         for key, value in _canonical_names(
-                            update_record(recipe.model, optimizer, prediction, loss),
+                            update_record(
+                                recipe.model,
+                                optimizer=optimizer,
+                                output=prediction,
+                                loss=loss,
+                            ),
                         ).items()
                     },
                 )
-                source_tools.adjust_learning_rate(optimizer, index + 1, args)
+                source_tools.adjust_learning_rate(optimizer, epoch=index + 1, args=args)
             candidate = tiny_config().make()
-            _require_equal(source_model, model_record(candidate.model))
-            _require_equal(source_training, training_record(candidate))
+            _require_equal(source_model, actual=model_record(candidate.model))
+            _require_equal(source_training, actual=training_record(candidate))
             if portable:
                 portable_model, portable_training = source_model, source_training
 
@@ -216,7 +206,7 @@ def verify(reference: Path, directory: Path, *, mint: bool) -> dict[str, object]
         },
     )
     source_rng = torch.get_rng_state()
-    _, loader = data.data_provider(args, "train")
+    _, loader = data.data_provider(args, flag="train")
     source_iterator = iter(loader)
     source_batches: list[dict[str, Tensor]] = []
     for _ in range(3):
@@ -230,29 +220,36 @@ def verify(reference: Path, directory: Path, *, mint: bool) -> dict[str, object]
     cfg.dataset.base_dir = "/"
     cfg = cfg.copy_tree().finalize()
     candidate = cfg.step.make()
-    _require_equal(source_initial, candidate.model.state_dict())
-    _require_equal({"rng": source_rng}, {"rng": torch.get_rng_state()})
+    _require_equal(source_initial, actual=candidate.model.state_dict())
+    _require_equal({"rng": source_rng}, actual={"rng": torch.get_rng_state()})
     dataset = cfg.dataset.make()
     iterator = iter(dataset.train_dataloader())
     for batch in source_batches:
         candidate_batch = next(iterator)
-        _require_equal(batch, candidate_batch)
+        _require_equal(batch, actual=candidate_batch)
         optimizer.zero_grad()
         prediction = cast(Tensor, recipe.model(batch["media"]))
-        loss = cast(Tensor, criterion(prediction, batch["label"]))
+        loss = cast(Tensor, criterion(prediction, target=batch["label"]))
         loss.backward()
         optimizer.step()
         output = candidate.train_step(**candidate_batch)
         _require_equal(
-            _canonical_names(update_record(recipe.model, optimizer, prediction, loss)),
-            update_record(
+            _canonical_names(
+                update_record(
+                    recipe.model,
+                    optimizer=optimizer,
+                    output=prediction,
+                    loss=loss,
+                ),
+            ),
+            actual=update_record(
                 candidate.model,
-                candidate.optimizer,
-                output["model"],
-                output["loss"],
+                optimizer=candidate.optimizer,
+                output=output["model"],
+                loss=output["loss"],
             ),
         )
-    _require_equal({"rng": source_data_rng}, {"rng": torch.get_rng_state()})
+    _require_equal({"rng": source_data_rng}, actual={"rng": torch.get_rng_state()})
     report: dict[str, object] = {
         "source_commit": revision,
         "dataset_sha256": dataset_hash,
@@ -280,7 +277,7 @@ def verify(reference: Path, directory: Path, *, mint: bool) -> dict[str, object]
             ("dlinear_model.pt", portable_model),
             ("dlinear_training.pt", portable_training),
         ):
-            write_tensors(destination / name, record)
+            write_tensors(destination / name, record=record)
             if (destination / name).stat().st_size > 32768:
                 raise ValueError(f"Golden exceeds the 32 KiB limit: {name}.")
         (destination / "source.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -301,8 +298,35 @@ def main() -> None:
     parser.add_argument("--mint", action="store_true")
     flags = cast(_Flags, parser.parse_args())
     print(
-        json.dumps(verify(flags.reference, flags.directory, mint=flags.mint), indent=2),
+        json.dumps(
+            verify(flags.reference, directory=flags.directory, mint=flags.mint),
+            indent=2,
+        ),
     )
+
+
+def _canonical_names(record: Mapping[str, Tensor]) -> dict[str, Tensor]:
+    names = {
+        "Linear_Seasonal.": "seasonal.",
+        "Linear_Trend.": "trend.",
+        "Linear_Decoder.": "decoder.",
+    }
+    result: dict[str, Tensor] = {}
+    for key, value in record.items():
+        canonical = key
+        for source, target in names.items():
+            canonical = canonical.replace(source, target)
+        result[canonical] = value
+    return result
+
+
+def _require_equal(
+    expected: Mapping[str, Tensor],
+    actual: Mapping[str, Tensor],
+) -> None:
+    differences = mismatches(expected, actual=actual)
+    if differences:
+        raise AssertionError("\n".join(differences))
 
 
 if __name__ == "__main__":

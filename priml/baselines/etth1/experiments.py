@@ -2,21 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import field
-from typing import TYPE_CHECKING, Self, cast, override
-
-from configgle import Makes, PartialConfig
+from configgle import PartialConfig
 
 from priml.baselines.etth1.checkpointer import Etth1Checkpointer
-from priml.baselines.etth1.data import Etth1Data
 from priml.baselines.etth1.metrics import ForecastMSE
-from priml.baselines.etth1.train_step import Etth1TrainStep
+from priml.baselines.etth1.train_step import Etth1TrainLoop
 from priml.runtime import SingleProcess
-from priml.train.train_loop import TrainLoop
-
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
 
 
 def dlinear_type1(progress: float, *, epochs: float = 10) -> float:
@@ -24,128 +15,6 @@ def dlinear_type1(progress: float, *, epochs: float = 10) -> float:
     epoch = int(progress * epochs + 1e-9)
     drops = max(0, epoch - 1)
     return 0.5**drops
-
-
-class Etth1TrainLoop(TrainLoop):
-    """Training loop reproducing the reference DLinear stopping rule."""
-
-    class Config(
-        Makes["Etth1TrainLoop"],
-        TrainLoop.Config[Etth1TrainStep.Config, Etth1Data.Config],
-    ):
-        """Training loop with ETTh1 and DLinear installed."""
-
-        step: Etth1TrainStep.Config = field(
-            default_factory=Etth1TrainStep.Config,
-        )
-        """DLinear model and optimization recipe."""
-
-        dataset: Etth1Data.Config = field(
-            default_factory=Etth1Data.Config,
-        )
-        """ETTh1 forecasting dataset."""
-
-        patience: int = 3
-        """Reference early-stopping patience in validation epochs."""
-
-        @override
-        def finalize(self) -> Self:
-            self.step.model.seq_len = self.dataset.seq_len
-            self.step.model.pred_len = self.dataset.pred_len
-            self.step.model.channels = self.dataset.channels
-            if self.step.seed is None:
-                self.step.seed = self.seed
-            return super().finalize()
-
-    def __init__(self, config: Config) -> None:
-        if config.patience <= 0:
-            raise ValueError("Early-stopping patience must be positive.")
-        self.patience = config.patience
-        self.best_validation_loss = float("inf")
-        self.bad_validation_epochs = 0
-        self.stop_early = False
-        self.validation_losses: list[float] = []
-        super().__init__(config)
-
-    @override
-    def _publish_eval_metrics(
-        self,
-        eval_metrics: dict[str, object],
-        *,
-        eval_time: float,
-        step: int,
-        is_final: bool,
-    ) -> dict[str, float]:
-        scalar_metrics = super()._publish_eval_metrics(
-            eval_metrics,
-            eval_time=eval_time,
-            step=step,
-            is_final=is_final,
-        )
-
-        validation_loss = scalar_metrics["total_loss"]
-        self.validation_losses.append(validation_loss)
-
-        if validation_loss <= self.best_validation_loss:
-            self.best_validation_loss = validation_loss
-            self.bad_validation_epochs = 0
-        else:
-            self.bad_validation_epochs += 1
-
-        if self.bad_validation_epochs >= self.patience:
-            self.stop_early = True
-
-        return scalar_metrics
-
-    @override
-    def _should_stop_early(self) -> bool:
-        return self.stop_early
-
-    @override
-    def _on_epoch_boundary(self) -> None:
-        super()._on_epoch_boundary()
-
-        # Save after validation so a resume starts after the full epoch.
-        if self.checkpointer is not None and self.local_step > 0:
-            self.checkpointer.save(self, self.step.global_step)
-
-        if self.stop_early:
-            self._terminal_epoch_evaluated = True
-            raise StopIteration
-
-    class StateDict(TrainLoop.StateDict):
-        """Training state plus the reference early-stopping decision."""
-
-        best_validation_loss: float
-        bad_validation_epochs: int
-        stop_early: bool
-        validation_losses: list[float]
-
-    @override
-    def state_dict(self) -> StateDict:
-        """Save stopping history together with model, loader, optimizer, and RNG."""
-        return {
-            **super().state_dict(),
-            "best_validation_loss": self.best_validation_loss,
-            "bad_validation_epochs": self.bad_validation_epochs,
-            "stop_early": self.stop_early,
-            "validation_losses": list(self.validation_losses),
-        }
-
-    @override
-    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
-        """Restore stopping history before continuing a saved run."""
-        if "best_validation_loss" not in state_dict:
-            raise ValueError(
-                "This legacy ETTh1 checkpoint lacks resume state. "
-                "Evaluate it with scripts.evaluate or start in a new run directory.",
-            )
-        super().load_state_dict(state_dict)
-        state = cast(Etth1TrainLoop.StateDict, state_dict)
-        self.best_validation_loss = state["best_validation_loss"]
-        self.bad_validation_epochs = state["bad_validation_epochs"]
-        self.stop_early = state["stop_early"]
-        self.validation_losses = list(state["validation_losses"])
 
 
 def exp000() -> Etth1TrainLoop.Config:

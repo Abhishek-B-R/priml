@@ -220,18 +220,18 @@ class DLinear(nn.Module):
 
         self.seasonal = nn.Linear(
             config.seq_len,
-            config.pred_len,
+            out_features=config.pred_len,
         )
 
         self.trend = nn.Linear(
             config.seq_len,
-            config.pred_len,
+            out_features=config.pred_len,
         )
 
         # Keep this unused layer because it affects the reference RNG sequence.
         self.decoder = nn.Linear(
             config.seq_len,
-            config.pred_len,
+            out_features=config.pred_len,
         )
 
         with torch.no_grad():

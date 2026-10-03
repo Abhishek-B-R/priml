@@ -23,7 +23,12 @@ class _OptimizerState(Protocol):
 
 
 def tiny_config() -> Etth1TrainStep.Config:
-    """Keep exp000's recipe, shrinking only forecasting geometry."""
+    """Keep exp000's recipe, shrinking only forecasting geometry.
+
+    Returns:
+      cfg: Seeded training step with a five-step history and three-step horizon.
+
+    """
     cfg = exp000().step
     cfg.seed = exp000().seed
     cfg.model.seq_len = 5
@@ -33,7 +38,12 @@ def tiny_config() -> Etth1TrainStep.Config:
 
 
 def tiny_batches() -> Iterator[dict[str, Tensor]]:
-    """Yield three distinct nonrandom batches with no broadcastable axes."""
+    """Yield three distinct nonrandom batches with no broadcastable axes.
+
+    Yields:
+      batch: Float32 media shaped (2, 5, 4) and labels shaped (2, 3, 4).
+
+    """
     for index in range(3):
         yield {
             "media": torch.arange(2 * 5 * 4, dtype=torch.float32).reshape(2, 5, 4) / 17
@@ -46,7 +56,15 @@ def tiny_batches() -> Iterator[dict[str, Tensor]]:
 
 
 def model_record(model: nn.Module) -> dict[str, Tensor]:
-    """Capture all initialized parameters, a complete forward, and RNG position."""
+    """Capture all initialized parameters, a complete forward, and RNG position.
+
+    Args:
+      model: Initialized forecasting model accepting a tiny batch's media.
+
+    Returns:
+      record: Initial parameters by name, input, output, and RNG fingerprint.
+
+    """
     batch = next(tiny_batches())
     return {
         **{
@@ -65,7 +83,19 @@ def update_record(
     output: Tensor,
     loss: Tensor,
 ) -> dict[str, Tensor]:
-    """Record every output, gradient, updated parameter, and optimizer state."""
+    """Record every output, gradient, updated parameter, and optimizer state.
+
+    Args:
+      model: Forecasting model after an optimization update.
+      optimizer: Optimizer holding the updated state.
+      output: Predictions from the update's forward pass.
+      loss: Mean squared error from the same forward pass.
+
+    Returns:
+      record: Detached tensors for output, loss, RNG, parameters, gradients,
+        and flattened optimizer state.
+
+    """
     record = {
         "output": output.detach().clone(),
         "loss": loss.detach().reshape(1).clone(),
@@ -80,12 +110,20 @@ def update_record(
             if parameter.grad is not None
         },
     }
-    _flatten_state(record, "optimizer", optimizer.state_dict())
+    _flatten_state(record, prefix="optimizer", value=optimizer.state_dict())
     return record
 
 
 def training_record(step: Etth1TrainStep) -> dict[str, Tensor]:
-    """Run three updates across the first schedule decay and capture all state."""
+    """Run three updates across the first schedule decay and capture all state.
+
+    Args:
+      step: Training step initialized with the tiny reference recipe.
+
+    Returns:
+      record: Initial model record followed by each update under stepN keys.
+
+    """
     record = model_record(step.model)
     for index, batch in enumerate(tiny_batches()):
         step.timer_epoch.global_count = index
@@ -95,9 +133,9 @@ def training_record(step: Etth1TrainStep) -> dict[str, Tensor]:
                 f"step{index + 1}/{key}": value
                 for key, value in update_record(
                     step.model,
-                    step.optimizer,
-                    output["model"],
-                    output["loss"],
+                    optimizer=step.optimizer,
+                    output=output["model"],
+                    loss=output["loss"],
                 ).items()
             },
         )
@@ -114,9 +152,9 @@ def _flatten_state(record: dict[str, Tensor], prefix: str, value: object) -> Non
             # This metadata is PRIML-only; keep the optimizer values below it.
             if key == "initial_lr":
                 continue
-            _flatten_state(record, f"{prefix}/{key}", item)
+            _flatten_state(record, prefix=f"{prefix}/{key}", value=item)
     elif isinstance(value, (tuple, list)):
         for index, item in enumerate(cast("list[object]", value)):
-            _flatten_state(record, f"{prefix}/{index}", item)
+            _flatten_state(record, prefix=f"{prefix}/{index}", value=item)
     elif value is not None:
         raise TypeError(f"Unsupported optimizer state: {type(value).__name__}")

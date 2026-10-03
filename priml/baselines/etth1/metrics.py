@@ -30,7 +30,9 @@ class ForecastMSE:
         target = batch["label"]
         assert isinstance(target, Tensor)
         with torch.no_grad():
-            self.losses.append(torch.nn.functional.mse_loss(logits, target).item())
+            self.losses.append(
+                torch.nn.functional.mse_loss(logits, target=target).item(),
+            )
 
     def compute(self) -> dict[str, float]:
         """Return the exact reference reduction, overriding generic total_loss."""

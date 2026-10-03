@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Self, TypedDict, cast, override
+from typing import TYPE_CHECKING, Self, TypedDict, cast, override
 
 import csv
 
@@ -21,11 +21,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
 
-TRAIN_ROWS: Final = 12 * 30 * 24
-VAL_ROWS: Final = 4 * 30 * 24
-TEST_ROWS: Final = 4 * 30 * 24
-
-
 class Etth1Data:
     """ETTh1 multivariate forecasting dataset."""
 
@@ -41,13 +36,13 @@ class Etth1Data:
         channels: int = 7
         """Number of numeric columns after the timestamp."""
 
-        train_rows: int = TRAIN_ROWS
+        train_rows: int = 12 * 30 * 24
         """Rows in the training split, used to fit normalization."""
 
-        val_rows: int = VAL_ROWS
+        val_rows: int = 4 * 30 * 24
         """Rows forecast in the validation split."""
 
-        test_rows: int = TEST_ROWS
+        test_rows: int = 4 * 30 * 24
         """Rows forecast in the held-out test split."""
 
         seq_len: int = 336
@@ -67,7 +62,10 @@ class Etth1Data:
 
         @override
         def finalize(self) -> Self:
-            self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
+            self.working_dir = resolve_working_dir(
+                self.base_dir,
+                working_dir=self.working_dir,
+            )
             return super().finalize()
 
     def __init__(self, config: Config) -> None:

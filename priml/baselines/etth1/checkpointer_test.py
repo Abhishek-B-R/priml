@@ -14,9 +14,17 @@ from priml.baselines.etth1.experiments import exp_smoke
 from priml.baselines.etth1.train_step import Etth1TrainStep
 from priml.lib.custom_json import DictCodec
 from priml.testing.golden import mismatches
+from priml.train.checkpointer import AsyncLocalStateDictStorer
 
 
-def test_tied_score_selects_latest_checkpoint(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "asynchronous",
+    [False, pytest.param(True, marks=pytest.mark.compute_distributed)],
+)
+def test_tied_score_selects_latest_checkpoint(
+    tmp_path: Path,
+    asynchronous: bool,
+) -> None:
     cfg = exp_smoke()
     cfg.base_dir = tmp_path
     cfg.dataset = fixture_config(tmp_path / "data")
@@ -25,18 +33,32 @@ def test_tied_score_selects_latest_checkpoint(tmp_path: Path) -> None:
     checker_cfg = Etth1Checkpointer.Config()
     checker_cfg.working_dir = tmp_path / "checkpoints"
     checker_cfg.best_metric = "total_loss"
+    if asynchronous:
+        checker_cfg.storer = AsyncLocalStateDictStorer.Config()
     checker = checker_cfg.make()
     try:
-        assert checker.on_eval(loop, 1, {"total_loss": 0.7})
-        assert checker.on_eval(loop, 2, {"total_loss": 0.7})
+        if asynchronous:
+            torch.distributed.init_process_group(
+                backend="gloo",
+                init_method=(tmp_path / "pg-init").resolve().as_uri(),
+                rank=0,
+                world_size=1,
+            )
+        assert checker.on_eval(loop, step=1, metrics={"total_loss": 0.7})
+        assert checker.on_eval(loop, step=2, metrics={"total_loss": 0.7})
+        checker.close()
         record = DictCodec.coerce(
             cast(object, json.loads((tmp_path / "checkpoints/best.json").read_text())),
         )
         assert record["step"] == 2
         assert record["value"] == 0.7
     finally:
-        checker.close()
-        loop.close()
+        try:
+            checker.close()
+        finally:
+            loop.close()
+            if asynchronous and torch.distributed.is_initialized():
+                torch.distributed.destroy_process_group()
 
 
 @pytest.mark.compute_training

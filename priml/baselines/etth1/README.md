@@ -6,20 +6,22 @@ seven variables.
 
 `exp000` follows the reference setup: batch size 8, Adam at `1e-4`, seed 2021,
 and a limit of 10 epochs / 10,260 updates. It stops early after three epochs
-without a better validation score. The full settings are in `experiments.py`.
+without matching or improving the best validation score. The full settings
+are in `experiments.py`.
 
 ## Run locally
 
-Run these commands from the PRIML repository. Data and checkpoints go in
-`.scratch/`, which Git ignores. If that directory contains an older run, use
-a fresh directory in all three commands below.
+Run these commands from the PRIML repository. Data and checkpoints go under
+`/opt/scratch`, the default resource root. To use another root, override
+`base_dir` when training and use the matching paths for preparation and
+evaluation. Use a fresh run directory if the checkpoint path contains an older run.
 
 Install the dependencies and download the data:
 
 ```sh
 uv sync --frozen
 uv --quiet run --frozen python -m priml.baselines.etth1.scripts.prepare_data \
-  --directory .scratch/datasets/etth1
+  --directory /opt/scratch/datasets/etth1
 ```
 
 Train the baseline:
@@ -27,15 +29,15 @@ Train the baseline:
 ```sh
 OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 MKL_CBWR=COMPATIBLE \
   uv --quiet run --frozen python -m priml \
-  priml.baselines.etth1.experiments.exp000 --override base_dir=.scratch
+  priml.baselines.etth1.experiments.exp000
 ```
 
 Evaluate the checkpoint with the best validation score:
 
 ```sh
 uv --quiet run --frozen python -m priml.baselines.etth1.scripts.evaluate \
-  --directory .scratch/datasets/etth1 \
-  --checkpoint .scratch/runs/etth1/exp000/checkpoints
+  --directory /opt/scratch/datasets/etth1 \
+  --checkpoint /opt/scratch/runs/etth1/exp000/checkpoints
 ```
 
 The download script checks the file's checksum. If you already have the CSV,
@@ -67,7 +69,7 @@ dependencies available:
 
 ```sh
 uv --quiet run --frozen python -m priml.baselines.etth1.scripts.verify_reference \
-  --reference /path/to/DLinear --directory .scratch/datasets/etth1
+  --reference /path/to/DLinear --directory /opt/scratch/datasets/etth1
 ```
 
 This checks the source files and compares small test runs plus three training

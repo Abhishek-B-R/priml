@@ -48,8 +48,8 @@ def evaluate(
             target = batch["label"]
             predictions.append(output.cpu())
             targets.append(target.cpu())
-            batch_mse.append(torch.nn.functional.mse_loss(output, target).item())
-            batch_mae.append(torch.nn.functional.l1_loss(output, target).item())
+            batch_mse.append(torch.nn.functional.mse_loss(output, target=target).item())
+            batch_mae.append(torch.nn.functional.l1_loss(output, target=target).item())
     if not predictions:
         raise ValueError("No complete test batches to evaluate.")
     prediction = torch.cat(predictions).numpy()
@@ -89,17 +89,21 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     flags = cast(_Flags, parser.parse_args())
     checkpoint = flags.checkpoint
+    protected = [flags.directory / "ETTh1.csv"]
     if checkpoint.is_dir():
+        selector = checkpoint / "best.json"
+        protected.append(selector)
         best = DictCodec.coerce(
-            cast(object, json.loads((checkpoint / "best.json").read_text())),
+            cast(object, json.loads(selector.read_text())),
         )
         if StrCodec.coerce(best["metric"]) != "total_loss":
             raise ValueError("Expected a validation total_loss best-checkpoint record.")
         checkpoint = checkpoint / f"step_{IntCodec.coerce(best['step']):08d}.pt"
+    protected.append(checkpoint)
     output_path = (
         validated_output_path(
             flags.output,
-            protected=[checkpoint, flags.directory / "ETTh1.csv"],
+            protected=protected,
         )
         if flags.output is not None
         else None
@@ -123,7 +127,7 @@ def main() -> None:
         "torch": torch.__version__,
         "numpy": np.__version__,
         "step": DictCodec.coerce(step["timer_step"])["global_count"],
-        **evaluate(model, dataset.test_dataloader()),
+        **evaluate(model, batches=dataset.test_dataloader()),
     }
     rendered = json.dumps(result, indent=2) + "\n"
     if output_path is not None:
