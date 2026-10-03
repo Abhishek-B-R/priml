@@ -51,6 +51,7 @@ from priml.testing.golden import assert_tensor_golden, read_tensors
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from multiprocessing.queues import Queue
+    from multiprocessing.synchronize import Event as EventType
 
     from torch import Tensor
 
@@ -391,12 +392,20 @@ def _burn(seconds: float) -> None:
         pass
 
 
-def _drain_into(inner: Makeable[DataPipeline], seed: int, queue: Queue[object]) -> None:
+def _drain_into(
+    inner: Makeable[DataPipeline],
+    seed: int,
+    queue: Queue[object],
+    drained: EventType,
+) -> None:
     set_seed_local(seed)
     _burn(BURN_SEC)
     for batch in inner.make():
         queue.put({"image": batch["image"], "label": batch["label"]})
     queue.put(None)
+    # On Linux torch shares a tensor as a file descriptor the reader collects
+    # from this process when it unpickles the batch, so stay up until it has.
+    _ = drained.wait()
 
 
 class WorkerDecode:
@@ -412,14 +421,16 @@ class WorkerDecode:
     def __iter__(self) -> Iterator[dict[str, object]]:
         context = multiprocessing.get_context("spawn")
         queue = cast("Queue[object]", context.Queue(maxsize=2))
+        drained = context.Event()
         worker = context.Process(
             target=_drain_into,
-            args=(self.config.inner, self.config.seed, queue),
+            args=(self.config.inner, self.config.seed, queue, drained),
         )
         worker.start()
         while isinstance(batch := queue.get(), dict):
             # ``_drain_into`` puts only the ``image`` / ``label`` dicts, then None.
             yield cast("dict[str, object]", batch)
+        drained.set()
         worker.join()
 
 
