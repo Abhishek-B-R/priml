@@ -544,7 +544,7 @@ def _pass(
                     torch.load(Path(compare_dir) / f"{index}.pt", weights_only=True),
                 )
                 drift.append(
-                    {name: _drift(want[name], batch[name]) for name in drift_fields}
+                    {name: _drift(want[name], batch[name]) for name in drift_fields},
                 )
         result = _Pass(
             digests=[{n: TensorDigest.of(t) for n, t in b.items()} for b in batches],
@@ -568,7 +568,9 @@ def _drift(want: Tensor, got: Tensor) -> tuple[float, float]:
     # subtracted. float32 holds every difference of two uint8 values exactly.
     a = want.contiguous().numpy().astype(np.float32)
     b = got.contiguous().numpy().astype(np.float32)
-    return float(np.abs(a - b).max()), float(np.count_nonzero(a != b)) / a.size
+    max_diff = float(np.abs(a - b).max())  # pyright: ignore[reportAny] -- numpy reductions are dtype-erased.
+    num_differ = int(np.count_nonzero(a != b))  # pyright: ignore[reportAny] -- numpy comparisons are dtype-erased.
+    return max_diff, num_differ / a.size
 
 
 def _require_empty_group(group: int) -> None:

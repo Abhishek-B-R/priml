@@ -166,7 +166,8 @@ def test_digests_survive_a_round_trip(tmp_path: Path) -> None:
     digests = ReferenceDigests(
         image_set="ab" * 32,
         batches=_digests(
-            {"image": IMAGE, "label": LABEL}, {"image": IMAGE + 1, "label": LABEL}
+            {"image": IMAGE, "label": LABEL},
+            {"image": IMAGE + 1, "label": LABEL},
         ),
     )
     digests.write(tmp_path / "d.sha256", header="two lines\nof header")
