@@ -46,10 +46,11 @@ A fork may not change:
   in a later one, work done ahead of the run), leave processes running after
   its pass, or read anything prepared offline from the image set.
 
-Open question for maintainers:
-  Is GPU decode (nvjpeg, DALI) in scope? It moves work off the CPU, so a
-  CPU-only score would reward it for free; it needs either a GPU-time term in
-  the score or its own chain.
+Out of scope:
+  GPU decode (nvjpeg, DALI). It moves work off the CPU, so this score would
+  reward it for free, and whether it costs the train step GPU time is
+  something only a run of the train step can show. It belongs in a chain
+  scored on train step time with the real model, not in this one.
 """
 
 from __future__ import annotations
