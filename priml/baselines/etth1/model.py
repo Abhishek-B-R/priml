@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import field
+from dataclasses import KW_ONLY, field
 from typing import Self, cast, override
 
 from configgle import Fig, Makeable, Makes
@@ -145,11 +145,14 @@ class SeriesDecomposition(nn.Module):
 class ReferenceLinear(nn.Linear):
     """Linear projection with the reference's random initialization."""
 
-    class Config(Fig["ReferenceLinear"]):
+    class Config(Fig["ReferenceLinear"], kw_only=False):
         channels_in: int = -1
         """Input width, supplied by DLinear."""
         channels_out: int = -1
         """Output width, supplied by DLinear."""
+
+        _: KW_ONLY
+
         bias: bool = True
         """Include a random bias."""
 
