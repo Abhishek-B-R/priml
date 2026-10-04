@@ -9,7 +9,7 @@ import torch
 
 from priml.baselines.etth1.data_test import fixture_config
 from priml.baselines.etth1.experiments import exp_smoke
-from priml.baselines.etth1.scripts import evaluate
+from priml.baselines.etth1.scripts import evaluation as evaluate
 
 
 @pytest.mark.parametrize("alias", ["direct", "hardlink", "symlink"])

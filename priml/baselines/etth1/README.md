@@ -77,17 +77,29 @@ updates on the real data, bit for bit. It allows the NumPy 2 compatibility
 change from `np.Inf` to `np.inf` in `utils/tools.py`.
 
 The goldens were recorded from the reference after the comparison passed.
-Add `--mint` only when deliberately regenerating them. Source details are in
-`testdata/source.json`.
+To deliberately regenerate them, use pytest so PRIML's numerical settings
+are loaded before the source capture:
+
+```sh
+uv --quiet run --frozen pytest \
+  priml/baselines/etth1/scripts/mint_reference_test.py -o addopts= \
+  --etth1-reference /path/to/DLinear \
+  --etth1-directory /opt/scratch/datasets/etth1
+```
+
+Adding `--mint` to the verifier command above runs the same pytest step.
+Source details are in `testdata/source.json`.
 
 ## Local results
 
 The CPU run on 2026-10-02 stopped after 5 epochs / 5,130 updates. The best
 checkpoint was step 2,052:
 
-- Validation MSE: 0.6461290121
-- Test MSE: 0.3748246133
-- Test MAE: 0.3994735181
+| Metric | Value |
+| --- | --- |
+| Validation MSE | 0.6461290121 |
+| Test MSE | 0.3748246133 |
+| Test MAE | 0.3994735181 |
 
 A full run of the reference matched the validation losses, saved parameters,
 final Torch RNG state, and every test prediction exactly. The comparison is

@@ -194,9 +194,25 @@ class Etth1Data:
         state = cast(Etth1Data.StateDict, state_dict)
         self.timer_epoch.load_state_dict(state["timer_epoch"])
         self._pending = state.get("loader")
-        if self._live is not None and self._pending is not None:
-            self._live.load_state_dict(self._pending)
-            self._pending = None
+        self._live = None
+
+    @property
+    def train_epoch_complete(self) -> bool:
+        """Check whether the saved cursor has reached the last full batch."""
+        state = self._live.state_dict() if self._live is not None else self._pending
+        if state is None or state["order"] is None:
+            return False
+        usable = len(state["order"]) // self.config.batch_size * self.config.batch_size
+        return state["position"] == usable
+
+    def finish_train_epoch(self) -> None:
+        """Advance the epoch without drawing the next shuffle."""
+        if not self.train_epoch_complete:
+            raise RuntimeError("The training epoch still has unread batches.")
+        self._live = None
+        self._pending = None
+        self.timer_epoch.global_count += 1
+        self.timer_epoch.local_count += 1
 
 
 class _ForecastBatches:

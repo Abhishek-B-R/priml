@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import override
+from typing import Self, cast, override
 
-from configgle import Fig
+from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
 
 import torch
 
-from priml.cost import Cost, elementwise_cost, matmul_cost, traffic
+from priml.cost import Cost, cost, elementwise_cost, matmul_cost, traffic
+from priml.model.custom_types import ChannelsIn, ChannelsOut, propagate_attr
 from priml.model.pool import avg_pool_cost
 
 
@@ -91,7 +92,7 @@ class SeriesDecomposition(nn.Module):
     class Config(Fig["SeriesDecomposition"]):
         """Series-decomposition configuration."""
 
-        moving_average: MovingAverage.Config = field(
+        moving_average: Makeable[nn.Module] = field(
             default_factory=MovingAverage.Config,
         )
         """Moving-average trend extractor."""
@@ -107,7 +108,8 @@ class SeriesDecomposition(nn.Module):
         ) -> Cost:
             """Cost the average, residual subtraction, and two adjoint joins."""
             elements = batch_size * seq_len * channels
-            return self.moving_average.cost(
+            return cost(
+                self.moving_average,
                 seq_len=seq_len,
                 batch_size=batch_size,
                 channels=channels,
@@ -126,7 +128,7 @@ class SeriesDecomposition(nn.Module):
     def __init__(self, config: Config) -> None:
         super().__init__()
 
-        self.moving_average = MovingAverage(config.moving_average)
+        self.moving_average = config.moving_average.make()
 
     @override
     def forward(
@@ -134,10 +136,60 @@ class SeriesDecomposition(nn.Module):
         x: Tensor,
     ) -> tuple[Tensor, Tensor]:
         """Return residual seasonal component and moving-average trend."""
-        moving_mean = self.moving_average(x)
+        moving_mean = cast(Tensor, self.moving_average(x))
         residual = x - moving_mean
 
         return residual, moving_mean
+
+
+class ReferenceLinear(nn.Linear):
+    """Linear projection with the reference's random initialization."""
+
+    class Config(Fig["ReferenceLinear"]):
+        channels_in: int = -1
+        """Input width, supplied by DLinear."""
+        channels_out: int = -1
+        """Output width, supplied by DLinear."""
+        bias: bool = True
+        """Include a random bias."""
+
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
+            """Count this projection's operations and parameters."""
+            del kwargs
+            return matmul_cost(
+                channels_in=self.channels_in,
+                channels_out=self.channels_out,
+                bias=self.bias,
+                rows=seq_len * batch_size,
+                dtype=dtype,
+            )
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(
+            in_features=config.channels_in,
+            out_features=config.channels_out,
+            bias=config.bias,
+        )
+
+
+class MeanLinear(ReferenceLinear):
+    """Start each forecast at the input mean, keeping the random bias."""
+
+    class Config(Makes["MeanLinear"], ReferenceLinear.Config):
+        pass
+
+    @override
+    def reset_parameters(self) -> None:
+        super().reset_parameters()
+        with torch.no_grad():
+            self.weight.copy_(torch.ones_like(self.weight) / self.in_features)
 
 
 class DLinear(nn.Module):
@@ -155,8 +207,33 @@ class DLinear(nn.Module):
         channels: int = 7
         """Number of input channels."""
 
-        kernel_size: int = 25
-        """Moving-average kernel width."""
+        decomposition: Makeable[nn.Module] = field(
+            default_factory=SeriesDecomposition.Config,
+        )
+        """Split the input into seasonal and trend values."""
+        seasonal: Makeable[nn.Module] = field(default_factory=MeanLinear.Config)
+        """Project the seasonal values into the forecast."""
+        trend: Makeable[nn.Module] = field(default_factory=MeanLinear.Config)
+        """Project the trend values into the forecast."""
+        decoder: Makeable[nn.Module] = field(default_factory=ReferenceLinear.Config)
+        """Unused layer retained for reference initialization."""
+
+        @override
+        def finalize(self) -> Self:
+            for projection in (self.seasonal, self.trend, self.decoder):
+                propagate_attr(
+                    projection,
+                    "channels_in",
+                    self.seq_len,
+                    protocol=ChannelsIn,
+                )
+                propagate_attr(
+                    projection,
+                    "channels_out",
+                    self.pred_len,
+                    protocol=ChannelsOut,
+                )
+            return super().finalize()
 
         def cost(
             self,
@@ -171,24 +248,29 @@ class DLinear(nn.Module):
                 raise ValueError(
                     "Cost sequence length must match the model's configured history.",
                 )
-            decomposition = SeriesDecomposition.Config()
-            decomposition.moving_average.kernel_size = self.kernel_size
-            projection = matmul_cost(
-                channels_in=self.seq_len,
-                channels_out=self.pred_len,
-                bias=True,
-                rows=batch_size * self.channels,
-                dtype=dtype,
-            )
             return (
-                decomposition.cost(
+                cost(
+                    self.decomposition,
                     seq_len=seq_len,
                     batch_size=batch_size,
                     channels=self.channels,
                     dtype=dtype,
                     **kwargs,
                 )
-                + projection.tile(2, copies=2)
+                + cost(
+                    self.seasonal,
+                    seq_len=self.channels,
+                    batch_size=batch_size,
+                    dtype=dtype,
+                    **kwargs,
+                )
+                + cost(
+                    self.trend,
+                    seq_len=self.channels,
+                    batch_size=batch_size,
+                    dtype=dtype,
+                    **kwargs,
+                )
                 + elementwise_cost(
                     primal=batch_size * self.channels * self.pred_len,
                     adjoint=0,
@@ -199,7 +281,15 @@ class DLinear(nn.Module):
                     adjoint_outputs=2,
                     dtype=dtype,
                 )
-                + Cost(params=(self.seq_len + 1) * self.pred_len)
+                + Cost(
+                    params=cost(
+                        self.decoder,
+                        seq_len=self.channels,
+                        batch_size=batch_size,
+                        dtype=dtype,
+                        **kwargs,
+                    ).params,
+                )
             )
 
     def __init__(self, config: Config) -> None:
@@ -213,45 +303,23 @@ class DLinear(nn.Module):
         self.pred_len = config.pred_len
         self.channels = config.channels
 
-        decomposition = SeriesDecomposition.Config()
-        decomposition.moving_average.kernel_size = config.kernel_size
-
-        self.decomposition = SeriesDecomposition(decomposition)
-
-        self.seasonal = nn.Linear(
-            config.seq_len,
-            out_features=config.pred_len,
-        )
-
-        self.trend = nn.Linear(
-            config.seq_len,
-            out_features=config.pred_len,
-        )
+        self.decomposition = config.decomposition.make()
+        self.seasonal = config.seasonal.make()
+        self.trend = config.trend.make()
 
         # Keep this unused layer because it affects the reference RNG sequence.
-        self.decoder = nn.Linear(
-            config.seq_len,
-            out_features=config.pred_len,
-        )
-
-        with torch.no_grad():
-            self.seasonal.weight.copy_(
-                torch.ones_like(self.seasonal.weight) / config.seq_len,
-            )
-            self.trend.weight.copy_(
-                torch.ones_like(self.trend.weight) / config.seq_len,
-            )
+        self.decoder = config.decoder.make()
 
     @override
     def forward(self, x: Tensor) -> Tensor:
         """Forecast future values from an input sequence."""
-        seasonal_init, trend_init = self.decomposition(x)
+        seasonal_init, trend_init = cast(tuple[Tensor, Tensor], self.decomposition(x))
 
         seasonal_init = seasonal_init.permute(0, 2, 1)
         trend_init = trend_init.permute(0, 2, 1)
 
-        seasonal_output = self.seasonal(seasonal_init)
-        trend_output = self.trend(trend_init)
+        seasonal_output = cast(Tensor, self.seasonal(seasonal_init))
+        trend_output = cast(Tensor, self.trend(trend_init))
 
         output = seasonal_output + trend_output
 

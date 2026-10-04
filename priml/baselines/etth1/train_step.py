@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import field
-from typing import TYPE_CHECKING, Self, cast, override
+from typing import TYPE_CHECKING, NotRequired, Self, cast, override
+
+import math
 
 from configgle import Makeable, Makes, PartialConfig
 from torch import Tensor
@@ -15,6 +17,7 @@ from priml.baselines.etth1.data import Etth1Data
 from priml.baselines.etth1.model import DLinear
 from priml.loss.custom_types import LossOutput
 from priml.loss.simple_loss import SimpleLoss, mse
+from priml.train.ema import NoEMA
 from priml.train.train_loop import TrainLoop
 from priml.train.train_step import TrainStep
 
@@ -64,6 +67,20 @@ class Etth1TrainStep(TrainStep):
 
     def __init__(self, config: Config) -> None:
         """Initialize with the reference DLinear Torch RNG stream."""
+        unsupported = {
+            "accumulate_grad_batches": config.accumulate_grad_batches != 1,
+            "gradient_clip_norm": config.gradient_clip_norm != math.inf,
+            "compile": config.compile is not None,
+            "dtype_autocast": config.dtype_autocast is not None,
+            "autocast_cache_enabled": config.autocast_cache_enabled,
+            "ema": type(config.ema) is not NoEMA.Config,
+            "skip_step_on_nonfinite_grad": config.skip_step_on_nonfinite_grad,
+        }
+        for name, enabled in unsupported.items():
+            if enabled:
+                raise ValueError(
+                    f"ETTh1's reference train step does not support {name}.",
+                )
         if config.seed is not None:
             # The reference seeds Torch directly.
             torch.manual_seed(config.seed)
@@ -86,8 +103,9 @@ class Etth1TrainStep(TrainStep):
         self.model.train()
         self.optimizer.zero_grad()
 
-        prediction = self.net(media)
-        loss = self.loss(prediction, **batch)["loss"]
+        with self.timer_forward:
+            prediction = self.net(media)
+            loss = self.loss(prediction, **batch)["loss"]
 
         loss.backward()
 
@@ -111,7 +129,7 @@ class Etth1TrainStep(TrainStep):
 
         self.model.train()
 
-        with torch.no_grad():
+        with self.timer_forward, torch.no_grad():
             prediction = self.net(media)
             loss = self.loss(prediction, **batch)["loss"]
 
@@ -131,7 +149,7 @@ class Etth1TrainStep(TrainStep):
 
         self.model.eval()
 
-        with torch.no_grad():
+        with self.timer_eval, torch.no_grad():
             prediction = self.net(media)
             loss = self.loss(prediction, **batch)["loss"]
 
@@ -180,7 +198,52 @@ class Etth1TrainLoop(TrainLoop):
         self.bad_validation_epochs = 0
         self.stop_early = False
         self.validation_losses: list[float] = []
+        self._pending_epoch_completion = False
         super().__init__(config)
+
+    @override
+    def train(self) -> None:
+        if self._closed:
+            raise RuntimeError("Cannot train a closed TrainLoop.")
+        try:
+            if not self.eval_only:
+                self._complete_pending_epoch()
+            super().train()
+        finally:
+            self.close()
+
+    @override
+    def _do_train_step(self, batch: dict[str, object]) -> None:
+        super()._do_train_step(batch)
+        self._pending_epoch_completion = cast(
+            Etth1Data,
+            self.dataset,
+        ).train_epoch_complete
+
+    def _complete_pending_epoch(self) -> bool:
+        if not self._pending_epoch_completion:
+            return False
+        cast(Etth1Data, self.dataset).finish_train_epoch()
+        self.train_loader = None
+        self.train_iter = None
+        self._pending_epoch_completion = False
+        self._on_epoch_boundary()
+        return True
+
+    @override
+    def _get_next_batch(self) -> dict[str, object]:
+        self._complete_pending_epoch()
+        if self._training and (
+            self.current_epoch >= self.max_epochs or self.stop_early
+        ):
+            raise StopIteration
+        return super()._get_next_batch()
+
+    @override
+    def _maybe_eval(self, *, is_final: bool = False, force: bool = False) -> None:
+        if not force and self._complete_pending_epoch() and self.eval_every_epoch:
+            return
+        super()._maybe_eval(is_final=is_final, force=force)
 
     @override
     def _publish_eval_metrics(
@@ -218,15 +281,23 @@ class Etth1TrainLoop(TrainLoop):
 
     @override
     def _on_epoch_boundary(self) -> None:
-        super()._on_epoch_boundary()
+        self._last_boundary_epoch = self.current_epoch
+        self.step.on_epoch_end()
+        is_final = (
+            self.current_epoch >= self.max_epochs
+            or self.step.global_step >= self.max_steps
+        )
+        if self.eval_every_epoch:
+            try:
+                self._maybe_eval(is_final=is_final, force=True)
+            except BaseException:
+                self._save_after_evaluation_error(is_final=is_final)
+                raise
+            self._terminal_epoch_evaluated = is_final or self.stop_early
 
         # Save after validation so a resume starts after the full epoch.
-        if self.checkpointer is not None and self.local_step > 0:
+        if self.checkpointer is not None:
             self.checkpointer.save(self, step=self.step.global_step)
-
-        if self.stop_early:
-            self._terminal_epoch_evaluated = True
-            raise StopIteration
 
     class StateDict(TrainLoop.StateDict):
         """Training state plus the reference early-stopping decision."""
@@ -235,6 +306,7 @@ class Etth1TrainLoop(TrainLoop):
         bad_validation_epochs: int
         stop_early: bool
         validation_losses: list[float]
+        pending_epoch_completion: NotRequired[bool]
 
     @override
     def state_dict(self) -> StateDict:
@@ -245,6 +317,7 @@ class Etth1TrainLoop(TrainLoop):
             "bad_validation_epochs": self.bad_validation_epochs,
             "stop_early": self.stop_early,
             "validation_losses": list(self.validation_losses),
+            "pending_epoch_completion": self._pending_epoch_completion,
         }
 
     @override
@@ -261,3 +334,13 @@ class Etth1TrainLoop(TrainLoop):
         self.bad_validation_epochs = state["bad_validation_epochs"]
         self.stop_early = state["stop_early"]
         self.validation_losses = list(state["validation_losses"])
+        self._pending_epoch_completion = state.get(
+            "pending_epoch_completion",
+            cast(Etth1Data, self.dataset).train_epoch_complete,
+        )
+        self.train_loader = None
+        self.train_iter = None
+        self._terminal_epoch_evaluated = False
+        self._last_boundary_epoch = self.current_epoch
+        self._last_eval_step = -1
+        self._last_cadence_step = self.step.global_step

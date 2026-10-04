@@ -9,7 +9,24 @@ Etth1TrainLoop.Config(
                                 seq_len=336,
                                 pred_len=96,
                                 channels=7,
-                                kernel_size=25
+                                decomposition=SeriesDecomposition.Config(
+                                        moving_average=MovingAverage.Config(kernel_size=25)
+                                ),
+                                seasonal=MeanLinear.Config(
+                                        channels_in=336,
+                                        channels_out=96,
+                                        bias=True
+                                ),
+                                trend=MeanLinear.Config(
+                                        channels_in=336,
+                                        channels_out=96,
+                                        bias=True
+                                ),
+                                decoder=ReferenceLinear.Config(
+                                        channels_in=336,
+                                        channels_out=96,
+                                        bias=True
+                                )
                         ),
                         optimizer=PartialConfig(<class 'functools.partial'>, <class 'torch.optim.adam.Adam'>, lr=0.0001),
                         loss=SimpleLoss.Config(

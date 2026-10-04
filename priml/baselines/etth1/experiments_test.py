@@ -3,15 +3,19 @@
 from pathlib import Path
 from typing import cast
 
+import copy
+import json
+
 from configgle.testing import assert_pprint_golden
 from torch import Tensor
 
 import pytest
 import torch
 
+from priml.baselines.etth1.checkpointer import Etth1Checkpointer
 from priml.baselines.etth1.data_test import fixture_config
 from priml.baselines.etth1.experiments import dlinear_type1, exp000, exp_smoke
-from priml.baselines.etth1.train_step import Etth1TrainStep
+from priml.baselines.etth1.train_step import Etth1TrainLoop, Etth1TrainStep
 from priml.lib.custom_json import DictCodec
 from priml.testing.golden import mismatches
 
@@ -146,3 +150,132 @@ def test_mid_epoch_resume_replays_exact_next_update(tmp_path: Path) -> None:
         assert resumed.step.global_step == 2
     finally:
         resumed.close()
+
+
+def epoch_config(directory: Path) -> Etth1TrainLoop.Config:
+    cfg = exp000()
+    cfg.base_dir = directory
+    cfg.dataset = fixture_config(directory / "data")
+    cfg.dataset.base_dir = "/"
+    cfg.max_epochs = 2
+    cfg.max_steps = float("inf")
+    cfg.patience = 10
+    cfg.checkpointer = None
+    return cfg
+
+
+@pytest.mark.compute_training
+@pytest.mark.parametrize("epochs", [1, 2])
+def test_step_budget_validates_complete_epochs(tmp_path: Path, epochs: int) -> None:
+    cfg = epoch_config(tmp_path)
+    cfg.max_epochs = epochs
+    control = cfg.make()
+    control.train()
+    assert isinstance(control.step, Etth1TrainStep)
+    expected = copy.deepcopy(control.step.state_dict())
+    expected_rng = torch.get_rng_state()
+    cfg.max_steps = epochs * 5
+    loop = cfg.make()
+    loop.train()
+    assert isinstance(loop.step, Etth1TrainStep)
+    assert len(loop.validation_losses) == epochs
+    assert loop.validation_losses == control.validation_losses
+    assert loop.current_epoch == epochs
+    assert not mismatches(expected["model"], loop.step.model.state_dict())
+    assert torch.equal(expected_rng, torch.get_rng_state())
+
+
+@pytest.mark.compute_training
+def test_resume_after_last_batch_before_validation(tmp_path: Path) -> None:
+    cfg = epoch_config(tmp_path)
+    control = cfg.make()
+    assert isinstance(control.step, Etth1TrainStep)
+    for _ in range(5):
+        control._do_train_step(control._get_next_batch())
+    state = copy.deepcopy(control.state_dict())
+    control.train()
+    expected = copy.deepcopy(control.step.model.state_dict())
+    expected_rng = torch.get_rng_state()
+    resumed = cfg.make()
+    assert isinstance(resumed.step, Etth1TrainStep)
+    resumed.load_state_dict(state)
+    resumed.train()
+    assert len(resumed.validation_losses) == 2
+    assert resumed.validation_losses == control.validation_losses
+    assert not mismatches(expected, resumed.step.model.state_dict())
+    assert torch.equal(expected_rng, torch.get_rng_state())
+
+
+@pytest.mark.compute_training
+def test_restore_into_running_loop_rewinds_iterator(tmp_path: Path) -> None:
+    cfg = epoch_config(tmp_path)
+    loop = cfg.make()
+    assert isinstance(loop.step, Etth1TrainStep)
+    try:
+        loop._do_train_step(loop._get_next_batch())
+        state = copy.deepcopy(loop.state_dict())
+        expected = loop._get_next_batch()
+        loop._do_train_step(expected)
+        expected_weights = copy.deepcopy(loop.step.model.state_dict())
+        expected_rng = torch.get_rng_state()
+        loop._do_train_step(loop._get_next_batch())
+        loop.load_state_dict(state)
+        actual = loop._get_next_batch()
+        assert not mismatches(
+            DictCodec.coerce(expected, Tensor),
+            DictCodec.coerce(actual, Tensor),
+        )
+        loop._do_train_step(actual)
+        assert not mismatches(expected_weights, loop.step.model.state_dict())
+        assert torch.equal(expected_rng, torch.get_rng_state())
+    finally:
+        loop.close()
+
+
+@pytest.mark.compute_training
+@pytest.mark.parametrize("resume", [False, True])
+def test_terminal_step_saves_validated_checkpoint(tmp_path: Path, resume: bool) -> None:
+    cfg = epoch_config(tmp_path)
+    cfg.max_steps = 5
+    cfg.checkpointer = Etth1Checkpointer.Config()
+    cfg.checkpointer.base_dir = "/"
+    cfg.checkpointer.working_dir = tmp_path / "checkpoints"
+    cfg.checkpointer.best_metric = "total_loss"
+    loop = cfg.make()
+    if resume:
+        for _ in range(5):
+            loop._do_train_step(loop._get_next_batch())
+        state = copy.deepcopy(loop.state_dict())
+        loop.close()
+        loop = cfg.make()
+        loop.load_state_dict(state)
+    loop.train()
+    assert len(loop.validation_losses) == 1
+    assert loop.step.global_step == 5
+    assert loop.current_epoch == 1
+    selector = DictCodec.coerce(
+        cast(object, json.loads((tmp_path / "checkpoints" / "best.json").read_text())),
+    )
+    assert selector["step"] == 5
+    saved = DictCodec.coerce(
+        cast(
+            object,
+            torch.load(
+                tmp_path / "checkpoints" / "step_00000005.pt",
+                weights_only=True,
+            ),
+        ),
+    )
+    assert saved["validation_losses"] == loop.validation_losses
+    assert saved["pending_epoch_completion"] is False
+
+
+@pytest.mark.compute_training
+def test_partial_epoch_does_not_force_epoch_validation(tmp_path: Path) -> None:
+    cfg = epoch_config(tmp_path)
+    cfg.max_steps = 4
+    loop = cfg.make()
+    loop.train()
+    assert loop.current_epoch == 0
+    assert loop.validation_losses == []
+    assert loop.step.global_step == 4
