@@ -37,7 +37,7 @@ from PIL import Image
 
 import numpy as np
 
-from priml.baselines.imagenet.throughput_experiments import exp000
+from priml.baselines.imagenet.throughput.experiments import exp000
 from priml.data.pipeline.dataset import DataPipeline
 from priml.data.processors import labels
 from priml.data.processors.labels import ImagenetSynsetToIndex

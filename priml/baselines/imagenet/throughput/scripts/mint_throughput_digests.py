@@ -30,8 +30,8 @@ from typing import Protocol, cast
 import argparse
 import logging
 
-from priml.baselines import imagenet
-from priml.baselines.imagenet.throughput_experiments import exp000
+from priml.baselines.imagenet import throughput
+from priml.baselines.imagenet.throughput.experiments import exp000
 
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ def main() -> int:
     cfg = exp000()
     if flags.base_dir is not None:
         cfg.base_dir = flags.base_dir
-    output = flags.output or Path(imagenet.__file__).with_name(
+    output = flags.output or Path(throughput.__file__).with_name(
         str(cfg.reference_digests),
     )
     cfg.make().mint_reference().write(

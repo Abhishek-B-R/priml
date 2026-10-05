@@ -11,13 +11,13 @@ from configgle.pprinting import pformat
 from configgle.testing import assert_pprint_golden
 
 from priml.baselines.imagenet import experiments
-from priml.baselines.imagenet.throughput_experiments import DATASET_DIR, exp000
+from priml.baselines.imagenet.throughput.experiments import DATASET_DIR, exp000
 from priml.data.pipeline.dataset import DataPipeline
 from priml.data.sources.extracted_imagenet import ExtractedImageNetSource
 
 
 def test_exp000_pprint() -> None:
-    assert_pprint_golden(test_file=__file__, name="throughput_exp000", config=exp000())
+    assert_pprint_golden(test_file=__file__, name="exp000", config=exp000())
 
 
 def test_exp000_times_its_own_reference() -> None:

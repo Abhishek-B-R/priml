@@ -30,15 +30,15 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.imagenet import throughput
-from priml.baselines.imagenet.throughput import (
+from priml.baselines.imagenet.throughput import throughput
+from priml.baselines.imagenet.throughput.experiments import exp000
+from priml.baselines.imagenet.throughput.throughput import (
     LoaderThroughput,
     PixelTolerance,
     ReferenceDigests,
     TensorDigest,
     digest_image_set,
 )
-from priml.baselines.imagenet.throughput_experiments import exp000
 from priml.data.pipeline.batching import Batcher
 from priml.data.pipeline.dataset import DataPipeline
 from priml.data.processors.augmentation import GetRandomResizedCropBoxFromDimensions
@@ -341,7 +341,9 @@ def test_run_logs_the_score_and_the_exact_tier(
     cfg = _minted(minted)
     cfg.num_repeats = 1
 
-    with caplog.at_level(logging.INFO, logger="priml.baselines.imagenet.throughput"):
+    with caplog.at_level(
+        logging.INFO, logger="priml.baselines.imagenet.throughput.throughput"
+    ):
         cfg.make().run("--passthrough")
 
     lines = [r.message for r in caplog.records if "passes of" in r.message]
@@ -375,7 +377,9 @@ def test_the_accurate_idct_fails_exact_and_passes_a_tier_that_says_so(
     exact = cfg.make().measure()
     cfg.tolerance = PixelTolerance.Config(max_abs_diff=255, max_fraction_differing=1)
 
-    with caplog.at_level(logging.INFO, logger="priml.baselines.imagenet.throughput"):
+    with caplog.at_level(
+        logging.INFO, logger="priml.baselines.imagenet.throughput.throughput"
+    ):
         cfg.make().run()
 
     assert exact.mismatches
