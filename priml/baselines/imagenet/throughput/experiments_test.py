@@ -11,7 +11,7 @@ from configgle.pprinting import pformat
 from configgle.testing import assert_pprint_golden
 
 from priml.baselines.imagenet import experiments
-from priml.baselines.imagenet.throughput.experiments import DATASET_DIR, exp000
+from priml.baselines.imagenet.throughput.experiments import exp000
 from priml.data.pipeline.dataset import DataPipeline
 from priml.data.sources.extracted_imagenet import ExtractedImageNetSource
 
@@ -32,7 +32,7 @@ def test_exp000_times_the_training_pipeline_on_its_own_image_set() -> None:
     assert isinstance(trained, DataPipeline.Config)
     assert isinstance(timed.source, ExtractedImageNetSource.Config)
     assert isinstance(trained.source, ExtractedImageNetSource.Config)
-    assert timed.source.working_dir == DATASET_DIR
+    assert timed.source.working_dir == "/datasets/imagenet_throughput"
     timed.source.working_dir = trained.source.working_dir
     assert pformat(timed) == pformat(trained)
 

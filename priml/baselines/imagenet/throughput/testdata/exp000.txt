@@ -130,6 +130,7 @@ LoaderThroughput.Config(
                 fields=['image', 'label'],
                 seed=0,
                 num_repeats=5,
+                survivor_grace_sec=5.0,
                 base_dir='/opt/scratch',
                 working_dir=PosixPath('/opt/scratch')
         )

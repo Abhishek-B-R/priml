@@ -550,13 +550,10 @@ def test_work_before_the_first_batch_is_timed(minted: Path) -> None:
 
 
 @pytest.mark.cli_python_subprocess
-def test_a_process_left_running_refuses_the_run(
-    minted: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_process_left_running_refuses_the_run(minted: Path) -> None:
     cfg = _wrapped(minted, LeaksAProcess.Config())
     cfg.num_repeats = 1
-    monkeypatch.setattr(throughput, "SURVIVOR_GRACE_SEC", 0.2)
+    cfg.survivor_grace_sec = 0.2
 
     with pytest.raises(RuntimeError, match="outlived its pass"):
         _ = cfg.make().measure()

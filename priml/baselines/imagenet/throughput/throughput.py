@@ -73,8 +73,6 @@ __all__ = [
 
 
 _CWD: Final = Path(__file__).resolve().parent
-SURVIVOR_GRACE_SEC: Final = 5.0
-"""How long a pass's process group may take to empty after the pass exits."""
 
 
 @dataclass(frozen=True)
@@ -258,6 +256,9 @@ class LoaderThroughput:
 
         num_repeats: int = 5
         """Timed passes over the data; the report keeps every one."""
+
+        survivor_grace_sec: float = 5.0
+        """How long a pass's process group may take to empty after the pass exits."""
 
         base_dir: Path | str | None = "/opt/scratch"
         """Resource root the pipelines resolve beneath."""
@@ -502,7 +503,7 @@ def _run_pass(
             f"Pass failed (exit code {process.exitcode}):\n{result}",
         )
     assert process.pid is not None
-    _require_empty_group(process.pid)
+    _require_empty_group(process.pid, cfg.survivor_grace_sec)
     return result, cpu - result.cpu_outside_sec
 
 
@@ -573,9 +574,9 @@ def _drift(want: Tensor, got: Tensor) -> tuple[float, float]:
     return max_diff, num_differ / a.size
 
 
-def _require_empty_group(group: int) -> None:
-    """Raise if any process of the pass's group outlives the grace period."""
-    deadline = time.monotonic() + SURVIVOR_GRACE_SEC
+def _require_empty_group(group: int, grace_sec: float) -> None:
+    """Raise if any process of the pass's group outlives ``grace_sec``."""
+    deadline = time.monotonic() + grace_sec
     while True:
         try:
             os.killpg(group, 0)

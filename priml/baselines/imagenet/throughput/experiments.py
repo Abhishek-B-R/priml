@@ -56,15 +56,9 @@ Out of scope:
 
 from __future__ import annotations
 
-from typing import Final
-
 from priml.baselines.imagenet.throughput.throughput import LoaderThroughput
 from priml.data.pipeline.dataset import DataPipeline
 from priml.data.sources.extracted_imagenet import ExtractedImageNetSource
-
-
-DATASET_DIR: Final = "/datasets/imagenet_throughput"
-"""Where ``prepare_throughput_data`` stages the timed image set."""
 
 
 def exp000() -> LoaderThroughput.Config:
@@ -92,5 +86,6 @@ def exp000() -> LoaderThroughput.Config:
     for pipeline in (cfg.pipeline, cfg.reference):
         assert isinstance(pipeline, DataPipeline.Config)
         assert isinstance(pipeline.source, ExtractedImageNetSource.Config)
-        pipeline.source.working_dir = DATASET_DIR
+        # Where ``prepare_throughput_data`` stages the timed image set.
+        pipeline.source.working_dir = "/datasets/imagenet_throughput"
     return cfg
