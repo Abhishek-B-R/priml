@@ -6,8 +6,8 @@ about the comparison biting; the subprocess tests run three pipelines that
 gamed the earlier in-process harness (decode in a worker process, a cache
 shared across passes, everything decoded before the first batch) and check
 each is now charged for its work. The golden freezes what ``exp000``'s
-pipeline makes of fixed JPEG bytes, element by element, so a regression the
-digests only flag can be located here.
+pipeline makes of fixed JPEG bytes, element by element: the run compares a
+fork against ``reference`` live, and this is what pins ``reference`` itself.
 """
 
 from __future__ import annotations
@@ -35,9 +35,6 @@ from priml.baselines.imagenet.throughput.experiments import exp000
 from priml.baselines.imagenet.throughput.throughput import (
     LoaderThroughput,
     PixelTolerance,
-    ReferenceDigests,
-    TensorDigest,
-    digest_image_set,
 )
 from priml.data.pipeline.batching import Batcher
 from priml.data.pipeline.dataset import DataPipeline
@@ -119,39 +116,22 @@ def _decode(pipeline: object) -> DecodeCropResizeBatch.Config:
 
 
 @pytest.fixture(scope="module")
-def minted(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Stage the five JPEGs and mint the tiny reference's digests next to the set.
-
-    The digest file sits beside the image set, never in it: the set's hash
-    covers every file under its directory.
-    """
+def staged(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Stage the five JPEGs once for every subprocess test."""
     root = tmp_path_factory.mktemp("throughput")
     _write(root, _jpegs())
-    _tiny(root).make().mint_reference().write(_digest_file(root))
     return root
 
 
-def _digest_file(root: Path) -> Path:
-    return root.parent / f"{root.name}.sha256"
-
-
-def _minted(root: Path) -> LoaderThroughput.Config:
-    cfg = _tiny(root)
-    cfg.reference_digests = _digest_file(root)
-    return cfg
-
-
-def _digests(*batches: dict[str, Tensor]) -> list[dict[str, TensorDigest]]:
-    return [{n: TensorDigest.of(t) for n, t in b.items()} for b in batches]
-
-
-def _pass(
-    digests: list[dict[str, TensorDigest]],
-    drift: list[dict[str, tuple[float, float]]] | None = None,
+def _result(
+    diffs: dict[tuple[int, str], throughput._Diff | str],
+    *,
+    num_batches: int = 1,
 ) -> throughput._Pass:
     return throughput._Pass(
-        digests=digests,
-        drift=drift or [],
+        diffs=diffs,
+        num_batches=num_batches,
+        num_reference_batches=1,
         num_images=2,
         elapsed_sec=1.0,
         first_batch_sec=0.5,
@@ -163,82 +143,48 @@ IMAGE: Final = torch.arange(24, dtype=torch.uint8).reshape(2, 3, 4)
 LABEL: Final = torch.tensor([3, 5])
 
 
-def test_digests_survive_a_round_trip(tmp_path: Path) -> None:
-    digests = ReferenceDigests(
-        image_set="ab" * 32,
-        batches=_digests(
-            {"image": IMAGE, "label": LABEL},
-            {"image": IMAGE + 1, "label": LABEL},
-        ),
+def test_diff_names_the_count_the_largest_move_and_where_it_starts() -> None:
+    moved = IMAGE.clone()
+    moved[1, 2, :2] += torch.tensor([4, 1], dtype=torch.uint8)
+
+    assert throughput._diff(IMAGE, IMAGE.clone()) is None
+    assert throughput._diff(IMAGE, moved) == throughput._Diff(
+        num_differing=2,
+        numel=IMAGE.numel(),
+        max_abs_diff=4.0,
+        first_index=(1, 2, 0),
     )
-    digests.write(tmp_path / "d.sha256", header="two lines\nof header")
-
-    assert ReferenceDigests.read(tmp_path / "d.sha256") == digests
-    assert digests.batches[0]["image"].shape == (2, 3, 4)
-    assert digests.batches[0]["image"].dtype == "uint8"
-
-
-def test_the_image_set_hash_sees_content_and_names(tmp_path: Path) -> None:
-    _write(tmp_path, _jpegs())
-    before = digest_image_set(tmp_path)
-    first = next((tmp_path / "train" / SYNSETS[0]).iterdir())
-
-    _ = first.write_bytes(first.read_bytes()[:-1] + b"\0")
-    edited = digest_image_set(tmp_path)
-    _ = first.rename(first.with_name("renamed.JPEG"))
-
-    assert len({before, edited, digest_image_set(tmp_path)}) == 3
-
-
-def test_the_committed_digests_match_exp000s_batch_shape() -> None:
-    cfg = exp000()
-    digests = ReferenceDigests.read(
-        Path(throughput.__file__).with_name(str(cfg.reference_digests)),
-    )
-    pipeline = cfg.pipeline
-    assert isinstance(pipeline, DataPipeline.Config)
-    (batcher,) = (p for p in pipeline.processors if isinstance(p, Batcher.Config))
-    (crop,) = (
-        p
-        for p in pipeline.processors
-        if isinstance(p, GetRandomResizedCropBoxFromDimensions.Config)
+    assert throughput._diff(IMAGE, IMAGE.reshape(3, 2, 4)) == (
+        "torch.uint8[3, 2, 4] vs torch.uint8[2, 3, 4]"
     )
 
-    assert len(digests.image_set) == 64
-    assert digests.batches
-    for batch in digests.batches:
-        assert batch["image"].shape == (batcher.size, 3, *crop.size)
-        assert batch["image"].dtype == "uint8"
-        assert batch["label"].shape == (batcher.size,)
-        assert batch["label"].dtype == "int64"
 
-
-def test_exact_tier_reports_any_changed_bytes() -> None:
+def test_exact_tier_reports_any_changed_value() -> None:
     job = LoaderThroughput(LoaderThroughput.Config())
     moved = IMAGE.clone()
-    moved[0, 0, 0] += 1
+    moved[0, 1, 2] += 3
+    diff = throughput._diff(IMAGE, moved)
+    assert diff is not None
 
-    lines, _, _ = job._check(
-        _digests({"image": IMAGE, "label": LABEL}),
-        _pass(_digests({"image": moved, "label": LABEL})),
-        repeat=1,
-    )
+    lines, _, _ = job._check(_result({(0, "image"): diff}), repeat=1)
 
-    assert lines == ["pass 1 batch 0 image: bytes differ from the frozen reference"]
+    assert lines == [
+        "pass 1 batch 0 image: 1/24 differ, max diff 3, first at [0, 1, 2]",
+    ]
 
 
 def test_shape_and_batch_count_changes_are_reported() -> None:
     job = LoaderThroughput(LoaderThroughput.Config())
-    want = _digests({"image": IMAGE, "label": LABEL})
 
     reshaped, _, _ = job._check(
-        want,
-        _pass(_digests({"image": IMAGE.reshape(3, 2, 4), "label": LABEL})),
+        _result({(0, "image"): "torch.uint8[3, 2, 4] vs torch.uint8[2, 3, 4]"}),
         repeat=0,
     )
-    extra, _, _ = job._check(want, _pass(want + want), repeat=0)
+    extra, _, _ = job._check(_result({}, num_batches=2), repeat=0)
 
-    assert reshaped == ["pass 0 batch 0 image: uint8[3, 2, 4] vs uint8[2, 3, 4]"]
+    assert reshaped == [
+        "pass 0 batch 0 image: torch.uint8[3, 2, 4] vs torch.uint8[2, 3, 4]",
+    ]
     assert extra == ["pass 0: 2 batches vs 1"]
 
 
@@ -246,36 +192,28 @@ def test_a_tolerance_admits_drift_within_it_and_keeps_labels_exact() -> None:
     cfg = LoaderThroughput.Config()
     cfg.tolerance = PixelTolerance.Config(max_abs_diff=2, max_fraction_differing=0.25)
     job = LoaderThroughput(cfg)
-    want = _digests({"image": IMAGE, "label": LABEL})
-    moved = _digests({"image": IMAGE + 1, "label": LABEL + 1})
+    label = throughput._diff(LABEL, LABEL + 1)
+    assert label is not None
+
+    def image(level: int) -> throughput._Diff:
+        return throughput._Diff(
+            num_differing=6,
+            numel=24,
+            max_abs_diff=level,
+            first_index=(0, 0, 0),
+        )
 
     within, diff, fraction = job._check(
-        want,
-        _pass(moved, [{"image": (2.0, 0.25)}]),
+        _result({(0, "image"): image(2), (0, "label"): label}),
         repeat=0,
     )
-    beyond, _, _ = job._check(want, _pass(moved, [{"image": (3.0, 0.25)}]), repeat=0)
+    beyond, _, _ = job._check(_result({(0, "image"): image(3)}), repeat=0)
 
-    assert within == ["pass 0 batch 0 label: bytes differ from the frozen reference"]
+    assert within == ["pass 0 batch 0 label: 2/2 differ, max diff 1, first at [0]"]
     assert (diff, fraction) == (2.0, 0.25)
-    assert beyond[0] == "pass 0 batch 0 image: max diff 3, 25.0000% differ"
-
-
-def test_drift_is_the_largest_difference_and_the_share_that_moved() -> None:
-    moved = IMAGE.clone()
-    moved[1, 2, :2] += torch.tensor([4, 1], dtype=torch.uint8)
-
-    assert throughput._drift(IMAGE, moved) == (4.0, 2 / IMAGE.numel())
-
-
-def test_a_staged_set_unlike_the_digests_refuses_to_run(tmp_path: Path) -> None:
-    _write(tmp_path, _jpegs())
-    cfg = _tiny(tmp_path)
-    ReferenceDigests(image_set="0" * 64, batches=[]).write(tmp_path / "d.sha256")
-    cfg.reference_digests = tmp_path / "d.sha256"
-
-    with pytest.raises(ValueError, match="re-mint the digests"):
-        _ = cfg.make().measure()
+    assert beyond == [
+        "pass 0 batch 0 image: 6/24 differ, max diff 3, first at [0, 0, 0]",
+    ]
 
 
 def test_rejects_a_nonsensical_count() -> None:
@@ -312,8 +250,8 @@ def test_exp000_batches_match_the_golden(tmp_path: Path) -> None:
 
 
 @pytest.mark.cli_python_subprocess
-def test_an_unchanged_pipeline_matches_and_counts_every_batch(minted: Path) -> None:
-    report = _minted(minted).make().measure()
+def test_an_unchanged_pipeline_matches_and_counts_every_batch(staged: Path) -> None:
+    report = _tiny(staged).make().measure()
 
     assert report.mismatches == []
     # Two batches of two, the first one included.
@@ -325,8 +263,8 @@ def test_an_unchanged_pipeline_matches_and_counts_every_batch(minted: Path) -> N
 
 
 @pytest.mark.cli_python_subprocess
-def test_decode_threads_leave_the_batches_alone(minted: Path) -> None:
-    cfg = _minted(minted)
+def test_decode_threads_leave_the_batches_alone(staged: Path) -> None:
+    cfg = _tiny(staged)
     cfg.num_repeats = 1
     _decode(cfg.pipeline).num_threads = 3
 
@@ -335,10 +273,10 @@ def test_decode_threads_leave_the_batches_alone(minted: Path) -> None:
 
 @pytest.mark.cli_python_subprocess
 def test_run_logs_the_score_and_the_exact_tier(
-    minted: Path,
+    staged: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    cfg = _minted(minted)
+    cfg = _tiny(staged)
     cfg.num_repeats = 1
 
     with caplog.at_level(
@@ -353,12 +291,12 @@ def test_run_logs_the_score_and_the_exact_tier(
         "images/sec (wall, not scored)",
         "first-batch sec",
     ]
-    assert all("bit-identical to the frozen reference" in m for m in lines)
+    assert all("bit-identical to the reference" in m for m in lines)
 
 
 @pytest.mark.cli_python_subprocess
-def test_run_refuses_to_report_a_rate_for_changed_batches(minted: Path) -> None:
-    cfg = _minted(minted)
+def test_run_refuses_to_report_a_rate_for_changed_batches(staged: Path) -> None:
+    cfg = _tiny(staged)
     cfg.num_repeats = 1
     _decode(cfg.pipeline).flip_p = 0.0
 
@@ -368,10 +306,10 @@ def test_run_refuses_to_report_a_rate_for_changed_batches(minted: Path) -> None:
 
 @pytest.mark.cli_python_subprocess
 def test_the_accurate_idct_fails_exact_and_passes_a_tier_that_says_so(
-    minted: Path,
+    staged: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    cfg = _minted(minted)
+    cfg = _tiny(staged)
     cfg.num_repeats = 1
     # The accurate IDCT lands a level or two off the fast one exp000 uses.
     _decode(cfg.pipeline).fast_dct = False
@@ -496,7 +434,7 @@ def _wrapped(
     | FrontLoaded.Config
     | LeaksAProcess.Config,
 ) -> LoaderThroughput.Config:
-    cfg = _minted(root)
+    cfg = _tiny(root)
     wrapper.inner = cfg.pipeline
     # The harness only iterates what ``pipeline`` makes; a wrapper yields the
     # same batches, so it stands in for a DataPipeline here.
@@ -505,8 +443,8 @@ def _wrapped(
 
 
 @pytest.mark.cli_python_subprocess
-def test_decode_in_a_worker_process_is_charged_to_the_pass(minted: Path) -> None:
-    cfg = _wrapped(minted, WorkerDecode.Config())
+def test_decode_in_a_worker_process_is_charged_to_the_pass(staged: Path) -> None:
+    cfg = _wrapped(staged, WorkerDecode.Config())
     cfg.num_repeats = 1
     started = time.process_time()
     _ = list(cfg.pipeline.make())
@@ -521,11 +459,8 @@ def test_decode_in_a_worker_process_is_charged_to_the_pass(minted: Path) -> None
 
 
 @pytest.mark.cli_python_subprocess
-def test_no_cache_survives_into_another_pass(minted: Path, tmp_path: Path) -> None:
-    # The log lives outside the image set, whose hash covers every file in it.
-    cfg = _wrapped(minted, Cached.Config(log=tmp_path / "cache.log"))
-    # A tolerance makes the reference run too, in a process of its own.
-    cfg.tolerance = PixelTolerance.Config()
+def test_no_cache_survives_into_another_pass(staged: Path, tmp_path: Path) -> None:
+    cfg = _wrapped(staged, Cached.Config(log=tmp_path / "cache.log"))
 
     report = cfg.make().measure()
 
@@ -538,8 +473,8 @@ def test_no_cache_survives_into_another_pass(minted: Path, tmp_path: Path) -> No
 
 
 @pytest.mark.cli_python_subprocess
-def test_work_before_the_first_batch_is_timed(minted: Path) -> None:
-    cfg = _wrapped(minted, FrontLoaded.Config())
+def test_work_before_the_first_batch_is_timed(staged: Path) -> None:
+    cfg = _wrapped(staged, FrontLoaded.Config())
     cfg.num_repeats = 1
 
     report = cfg.make().measure()
@@ -552,8 +487,8 @@ def test_work_before_the_first_batch_is_timed(minted: Path) -> None:
 
 
 @pytest.mark.cli_python_subprocess
-def test_a_process_left_running_refuses_the_run(minted: Path) -> None:
-    cfg = _wrapped(minted, LeaksAProcess.Config())
+def test_a_process_left_running_refuses_the_run(staged: Path) -> None:
+    cfg = _wrapped(staged, LeaksAProcess.Config())
     cfg.num_repeats = 1
     cfg.survivor_grace_sec = 0.2
 

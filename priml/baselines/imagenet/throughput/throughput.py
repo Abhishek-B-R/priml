@@ -1,10 +1,19 @@
 """Input pipeline throughput: images per CPU-second, with the batches pinned.
 
 :class:`LoaderThroughput` drains a training input pipeline, times it, and
-checks every batch it produced against frozen SHA-256 digests of the
-reference pipeline's batches on a fixed image set. A pipeline that is faster
-but changes one pixel or one label is a different recipe, not a faster one,
-so a mismatch fails the run instead of reporting a number.
+compares every batch it produced, tensor by tensor, against the batches the
+reference pipeline makes from the same image set under the same seed. A
+pipeline that is faster but changes one pixel or one label is a different
+recipe, not a faster one, so a mismatch fails the run instead of reporting a
+number, and says which batch and field moved, how many values, by how much,
+and where the first one is.
+
+The reference drains once per run, in its own untimed process, and its
+batches go to a scratch directory (about 40 MB per 512-image batch, so
+roughly 650 MB for exp000's set). What it computes is pinned in CI by the
+tensor golden in ``throughput_test.py``, which a change to shared decode or
+crop code fails; a fork that changes the reference to match itself is caught
+there, not here.
 
 Each pass runs in a fresh spawned process, so nothing a pipeline caches in
 memory survives into the next pass, and the reference is never computed in a
@@ -18,7 +27,7 @@ process and every descendant process that was waited for before its parent
 exited, which is how ``multiprocessing``, process pools, and
 ``subprocess.run`` end. The pass process reports, and this process subtracts,
 its own CPU before the window opened (interpreter start, harness imports) and
-the main thread's CPU spent hashing after it closed. Not counted: a
+the main thread's CPU spent comparing after it closed. Not counted: a
 descendant nobody waits for. The pass process leads its own process group,
 and a run whose group still has a live process after the pass refuses to
 report; a descendant that leaves the group, or exits without being waited
@@ -29,9 +38,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Self, cast, override
+from typing import TYPE_CHECKING, Self, cast, override
 
-import hashlib
 import logging
 import multiprocessing
 import os
@@ -62,17 +70,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-__all__ = [
-    "LoaderThroughput",
-    "PixelTolerance",
-    "ReferenceDigests",
-    "TensorDigest",
-    "ThroughputReport",
-    "digest_image_set",
-]
-
-
-_CWD: Final = Path(__file__).resolve().parent
+__all__ = ["LoaderThroughput", "PixelTolerance", "ThroughputReport"]
 
 
 @dataclass(frozen=True)
@@ -101,100 +99,6 @@ class ThroughputReport:
 
     max_fraction_differing: float
     """Largest fraction of one batch field's values that differ."""
-
-
-@dataclass(frozen=True)
-class TensorDigest:
-    """One tensor, pinned by dtype, shape, and the SHA-256 of its bytes."""
-
-    dtype: str
-    shape: tuple[int, ...]
-    sha256: str
-
-    @classmethod
-    def of(cls, tensor: Tensor) -> Self:
-        """Digest ``tensor``'s row-major bytes.
-
-        Returns:
-          digest: The tensor's dtype, shape, and content hash.
-
-        """
-        array = tensor.detach().cpu().contiguous().numpy()
-        return cls(
-            dtype=str(tensor.dtype).removeprefix("torch."),
-            shape=tuple(tensor.shape),
-            sha256=hashlib.sha256(array.tobytes()).hexdigest(),
-        )
-
-
-@dataclass(frozen=True)
-class ReferenceDigests:
-    """The frozen reference: the image set's hash and every batch's digests.
-
-    A text file, one line per item, so a re-mint reads as a diff::
-
-        image_set <sha256>
-        batch 0 image uint8 512x3x160x160 <sha256>
-    """
-
-    image_set: str
-    batches: list[dict[str, TensorDigest]]
-
-    @classmethod
-    def read(cls, path: Path) -> Self:
-        """Parse a digest file, skipping ``#`` comment lines.
-
-        Returns:
-          digests: The file's contents.
-
-        """
-        image_set = ""
-        batches: list[dict[str, TensorDigest]] = []
-        for line in path.read_text().splitlines():
-            words = line.split()
-            if not words or words[0].startswith("#"):
-                continue
-            if words[0] == "image_set":
-                image_set = words[1]
-                continue
-            _, index, name, dtype, shape, sha256 = words
-            if int(index) == len(batches):
-                batches.append({})
-            batches[int(index)][name] = TensorDigest(
-                dtype=dtype,
-                shape=tuple(int(n) for n in shape.split("x")),
-                sha256=sha256,
-            )
-        return cls(image_set=image_set, batches=batches)
-
-    def write(self, path: Path, *, header: str = "") -> None:
-        """Write the digests, prefixing each line of ``header`` with ``#``."""
-        lines = [f"# {line}" for line in header.splitlines()]
-        lines.append(f"image_set {self.image_set}")
-        for index, batch in enumerate(self.batches):
-            for name, digest in batch.items():
-                shape = "x".join(str(n) for n in digest.shape)
-                lines.append(
-                    f"batch {index} {name} {digest.dtype} {shape} {digest.sha256}",
-                )
-        _ = path.write_text("\n".join(lines) + "\n")
-
-
-def digest_image_set(directory: Path) -> str:
-    """Hash every file under ``directory``: its relative path and its bytes.
-
-    Symlinks are followed, so a linked ImageNet subset hashes its images.
-
-    Returns:
-      sha256: Hex digest of the sorted ``<path> <sha256>`` manifest.
-
-    """
-    manifest = hashlib.sha256()
-    for path in sorted(p for p in directory.rglob("*") if p.is_file()):
-        with path.open("rb") as file:
-            content = hashlib.file_digest(file, "sha256").hexdigest()
-        manifest.update(f"{path.relative_to(directory)} {content}\n".encode())
-    return manifest.hexdigest()
 
 
 class PixelTolerance:
@@ -226,7 +130,7 @@ class PixelTolerance:
 
 
 class LoaderThroughput:
-    """Time ``pipeline`` and require its batches to match the frozen reference."""
+    """Time ``pipeline`` and require its batches to match ``reference``'s."""
 
     class Config(Fig["LoaderThroughput"]):
         pipeline: Makeable[DataPipeline] = field(
@@ -237,12 +141,8 @@ class LoaderThroughput:
         reference: Makeable[DataPipeline] = field(
             default_factory=ffcv_train_data_pipeline,
         )
-        """The pipeline the digests were minted from. Its source names the
-        image set; it runs only under a tolerance, to recover the pixels a
-        digest cannot hold, and then must still reproduce its digests."""
-
-        reference_digests: Path | str = "throughput_exp000_synthetic.sha256"
-        """Frozen digests of ``reference``'s batches, beside this module."""
+        """The pipeline whose batches ``pipeline`` must reproduce, drained once
+        per run in an untimed process of its own."""
 
         tolerance: Makeable[PixelTolerance] | None = None
         """None compares every field bit for bit."""
@@ -280,14 +180,7 @@ class LoaderThroughput:
     def __init__(self, config: Config) -> None:
         if config.num_repeats <= 0:
             raise ValueError(f"num_repeats must be positive; got {config.num_repeats}.")
-        reference = config.reference
-        if not (
-            isinstance(reference, DataPipeline.Config)
-            and isinstance(reference.source, HasNormalizedWorkingDirPattern)
-        ):
-            raise TypeError("reference must be a DataPipeline reading a directory.")
         self.config = config
-        self.image_set_dir = Path(reference.source.working_dir)
         self.tolerance = None if config.tolerance is None else config.tolerance.make()
 
     def run(self, *args: str) -> None:
@@ -309,7 +202,7 @@ class LoaderThroughput:
                 + "\n".join(report.mismatches),
             )
         if self.tolerance is None:
-            tier = "batches bit-identical to the frozen reference"
+            tier = "batches bit-identical to the reference"
         else:
             tol = self.tolerance.config
             tier = (
@@ -337,43 +230,20 @@ class LoaderThroughput:
             )
 
     def measure(self) -> ThroughputReport:
-        """Check the image set, then time ``num_repeats`` fresh-process passes.
+        """Drain ``reference`` once, then time ``num_repeats`` fresh-process passes.
 
         Returns:
           report: Per-pass rates and every batch outside the correctness tier.
 
         Raises:
-          ValueError: The staged image set is not the one the digests were
-            minted on, or the reference no longer reproduces its digests.
+          ValueError: A pass yielded no batch.
 
         """
         cfg = self.config
-        expected = ReferenceDigests.read(_CWD / cfg.reference_digests)
-        image_set = digest_image_set(self.image_set_dir)
-        if image_set != expected.image_set:
-            raise ValueError(
-                f"The image set under {self.image_set_dir} hashes to {image_set}; "
-                f"the reference digests were minted on {expected.image_set}. "
-                "Restage it, or re-mint the digests for this set.",
-            )
         with tempfile.TemporaryDirectory() as scratch:
-            compare_dir = None
-            if self.tolerance is not None:
-                reference, _ = _run_pass(cfg.reference, cfg, save_dir=scratch)
-                if reference.digests != expected.batches:
-                    raise ValueError(
-                        "The reference no longer reproduces its frozen digests.",
-                    )
-                compare_dir = scratch
+            _ = _run_pass(cfg.reference, cfg, save_dir=scratch)
             passes = [
-                _run_pass(
-                    cfg.pipeline,
-                    cfg,
-                    compare_dir=compare_dir,
-                    drift_fields=None
-                    if self.tolerance is None
-                    else self.tolerance.config.fields,
-                )
+                _run_pass(cfg.pipeline, cfg, compare_dir=scratch)
                 for _ in range(cfg.num_repeats)
             ]
         mismatches: list[str] = []
@@ -381,7 +251,7 @@ class LoaderThroughput:
         for repeat, (result, _) in enumerate(passes):
             if result.num_images == 0:
                 raise ValueError(f"Pass {repeat} yielded no batch.")
-            lines, diff, fraction = self._check(expected.batches, result, repeat)
+            lines, diff, fraction = self._check(result, repeat)
             mismatches += lines
             worst_diff, worst_fraction = (
                 max(worst_diff, diff),
@@ -397,65 +267,52 @@ class LoaderThroughput:
             max_fraction_differing=worst_fraction,
         )
 
-    def mint_reference(self) -> ReferenceDigests:
-        """Drain ``reference`` in a fresh process and digest what it made.
-
-        Returns:
-          digests: The image set's hash and every reference batch's digests.
-
-        """
-        result, _ = _run_pass(self.config.reference, self.config)
-        return ReferenceDigests(
-            image_set=digest_image_set(self.image_set_dir),
-            batches=result.digests,
-        )
-
-    def _check(
-        self,
-        expected: list[dict[str, TensorDigest]],
-        result: _Pass,
-        repeat: int,
-    ) -> tuple[list[str], float, float]:
+    def _check(self, result: _Pass, repeat: int) -> tuple[list[str], float, float]:
         """Return one line per field outside its tier, and the worst drift."""
-        if len(expected) != len(result.digests):
-            return (
-                [f"pass {repeat}: {len(result.digests)} batches vs {len(expected)}"],
-                0.0,
-                0.0,
-            )
         lines: list[str] = []
+        if result.num_batches != result.num_reference_batches:
+            lines.append(
+                f"pass {repeat}: {result.num_batches} batches vs "
+                f"{result.num_reference_batches}",
+            )
         worst_diff, worst_fraction = 0.0, 0.0
-        for index, (want, got) in enumerate(zip(expected, result.digests, strict=True)):
-            for name, digest in want.items():
-                other = got[name]
-                where = f"pass {repeat} batch {index} {name}"
-                if (other.dtype, other.shape) != (digest.dtype, digest.shape):
-                    lines.append(
-                        f"{where}: {other.dtype}{list(other.shape)} vs "
-                        f"{digest.dtype}{list(digest.shape)}",
-                    )
-                elif other.sha256 == digest.sha256:
+        for (index, name), diff in result.diffs.items():
+            where = f"pass {repeat} batch {index} {name}"
+            if isinstance(diff, str):
+                lines.append(f"{where}: {diff}")
+                continue
+            fraction = diff.num_differing / diff.numel
+            if self.tolerance is not None and name in self.tolerance.config.fields:
+                worst_diff = max(worst_diff, diff.max_abs_diff)
+                worst_fraction = max(worst_fraction, fraction)
+                if self.tolerance.admits(diff.max_abs_diff, fraction):
                     continue
-                elif self.tolerance is None or name not in self.tolerance.config.fields:
-                    lines.append(f"{where}: bytes differ from the frozen reference")
-                else:
-                    diff, fraction = result.drift[index][name]
-                    worst_diff = max(worst_diff, diff)
-                    worst_fraction = max(worst_fraction, fraction)
-                    if not self.tolerance.admits(diff, fraction):
-                        lines.append(
-                            f"{where}: max diff {diff:g}, {fraction:.4%} differ",
-                        )
+            lines.append(
+                f"{where}: {diff.num_differing}/{diff.numel} differ, max diff "
+                f"{diff.max_abs_diff:g}, first at {list(diff.first_index)}",
+            )
         return lines, worst_diff, worst_fraction
+
+
+@dataclass(frozen=True)
+class _Diff:
+    """How one batch field differs from the reference's."""
+
+    num_differing: int
+    numel: int
+    max_abs_diff: float
+    first_index: tuple[int, ...]
 
 
 @dataclass(frozen=True)
 class _Pass:
     """What one pass process sends back."""
 
-    digests: list[dict[str, TensorDigest]]
-    drift: list[dict[str, tuple[float, float]]]
-    """Per batch, each tolerance field's max diff and fraction differing."""
+    diffs: dict[tuple[int, str], _Diff | str]
+    """Each (batch, field) that differs from the reference: how, or why the
+    two cannot be compared (dtype or shape)."""
+    num_batches: int
+    num_reference_batches: int
     num_images: int
     elapsed_sec: float
     first_batch_sec: float
@@ -469,7 +326,6 @@ def _run_pass(
     *,
     save_dir: str | None = None,
     compare_dir: str | None = None,
-    drift_fields: list[str] | None = None,
 ) -> tuple[_Pass, float]:
     """Drain ``pipeline`` once in a fresh process; return it and its CPU sec."""
     context = multiprocessing.get_context("spawn")
@@ -482,7 +338,6 @@ def _run_pass(
         kwargs={
             "seed": cfg.seed,
             "fields": cfg.fields,
-            "drift_fields": drift_fields or [],
             "save_dir": save_dir,
             "compare_dir": compare_dir,
             "connection": sender,
@@ -512,12 +367,11 @@ def _pass(
     *,
     seed: int,
     fields: list[str],
-    drift_fields: list[str],
     save_dir: str | None,
     compare_dir: str | None,
     connection: Connection,
 ) -> None:
-    """Run in a fresh process: drain one pass, then digest it outside the window."""
+    """Run in a fresh process: drain one pass, then compare it outside the window."""
     os.setpgid(0, 0)
     try:
         cpu_before = _self_cpu_sec()
@@ -534,26 +388,31 @@ def _pass(
 
         # Only this thread's CPU from here on is subtracted: a pipeline thread
         # still running is the pipeline's cost.
-        hashing_started = time.thread_time()
-        drift: list[dict[str, tuple[float, float]]] = []
+        comparing_started = time.thread_time()
+        diffs: dict[tuple[int, str], _Diff | str] = {}
+        num_reference_batches = 0
         for index, batch in enumerate(batches):
             if save_dir is not None:
                 torch.save(batch, Path(save_dir) / f"{index}.pt")
-            if compare_dir is not None:
+        if compare_dir is not None:
+            num_reference_batches = len(list(Path(compare_dir).glob("*.pt")))
+            for index, batch in enumerate(batches[:num_reference_batches]):
                 want = cast(
                     "dict[str, Tensor]",
                     torch.load(Path(compare_dir) / f"{index}.pt", weights_only=True),
                 )
-                drift.append(
-                    {name: _drift(want[name], batch[name]) for name in drift_fields},
-                )
+                for name in fields:
+                    diff = _diff(want[name], batch[name])
+                    if diff is not None:
+                        diffs[index, name] = diff
         result = _Pass(
-            digests=[{n: TensorDigest.of(t) for n, t in b.items()} for b in batches],
-            drift=drift,
+            diffs=diffs,
+            num_batches=len(batches),
+            num_reference_batches=num_reference_batches,
             num_images=sum(len(b[fields[0]]) for b in batches),
             elapsed_sec=elapsed,
             first_batch_sec=first_batch_sec,
-            cpu_outside_sec=cpu_before + time.thread_time() - hashing_started,
+            cpu_outside_sec=cpu_before + time.thread_time() - comparing_started,
         )
     except BaseException:
         connection.send(traceback.format_exc())
@@ -561,17 +420,25 @@ def _pass(
     connection.send(result)
 
 
-def _drift(want: Tensor, got: Tensor) -> tuple[float, float]:
-    """Return the max per-value difference and the fraction that differ."""
-    if want.shape != got.shape:
-        return float("inf"), 1.0
+def _diff(want: Tensor, got: Tensor) -> _Diff | str | None:
+    """Return how ``got`` differs from ``want``, or None when the bits match."""
+    if (want.dtype, want.shape) != (got.dtype, got.shape):
+        return f"{got.dtype}{list(got.shape)} vs {want.dtype}{list(want.shape)}"
     # numpy, not torch: its elementwise ops stay on this thread, whose CPU is
-    # subtracted. float32 holds every difference of two uint8 values exactly.
-    a = want.contiguous().numpy().astype(np.float32)
-    b = got.contiguous().numpy().astype(np.float32)
-    max_diff = float(np.abs(a - b).max())  # pyright: ignore[reportAny] -- numpy reductions are dtype-erased.
-    num_differ = int(np.count_nonzero(a != b))  # pyright: ignore[reportAny] -- numpy comparisons are dtype-erased.
-    return max_diff, num_differ / a.size
+    # subtracted. Compared as bytes so a NaN equals itself; float64 holds every
+    # difference of two values of the integer dtypes a batch carries exactly.
+    a, b = want.contiguous().numpy(), got.contiguous().numpy()
+    if a.tobytes() == b.tobytes():
+        return None
+    differing = a != b  # pyright: ignore[reportAny] -- numpy comparisons are dtype-erased.
+    where = np.argwhere(differing)  # pyright: ignore[reportAny] -- numpy indexing is dtype-erased.
+    return _Diff(
+        num_differing=int(np.count_nonzero(differing)),  # pyright: ignore[reportAny] -- numpy comparisons are dtype-erased.
+        numel=a.size,
+        max_abs_diff=float(np.abs(a.astype(np.float64) - b.astype(np.float64)).max()),  # pyright: ignore[reportAny] -- numpy reductions are dtype-erased.
+        # Empty when only the bytes differ (a signed zero): the count says 0.
+        first_index=tuple(int(i) for i in where[0]) if len(where) else (),  # pyright: ignore[reportAny] -- numpy indexing is dtype-erased.
+    )
 
 
 def _require_empty_group(group: int, grace_sec: float) -> None:

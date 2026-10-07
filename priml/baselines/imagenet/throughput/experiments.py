@@ -28,12 +28,14 @@ Score:
   time, and on a shared machine it is the noisier number.
 
 Correctness:
-  Exact (the default): every batch's ``image`` and ``label`` tensors hash to
-  the frozen digests in ``throughput_exp000_synthetic.sha256``, minted from
-  ``reference`` on the synthetic set ``prepare_throughput_data`` writes. The
-  run refuses to start on any other image set. A ``PixelTolerance`` admits
-  bounded drift in ``image`` only, labels staying exact; a run under one says
-  so in every log line, and its number is not comparable with an exact one.
+  Exact (the default): every batch's ``image`` and ``label`` tensors equal
+  the ones ``reference`` makes from the same image set under the same seed,
+  bit for bit; a mismatch names the batch and field, how many values moved,
+  the largest difference, and the first index. The tensor golden in
+  ``throughput_test.py`` pins what ``reference`` itself computes. A
+  ``PixelTolerance`` admits bounded drift in ``image`` only, labels staying
+  exact; a run under one says so in every log line, and its number is not
+  comparable with an exact one.
 
 A fork may change:
   Anything inside ``pipeline``: decoders, processor order, threads,
@@ -41,8 +43,8 @@ A fork may change:
   order, holds the same bytes, and stays valid once yielded.
 
 A fork may not change:
-  The output bytes beyond its tier, the image set, the batch order, the
-  frozen digests, ``reference``, the seed, or the harness and its timing.
+  The output bytes beyond its tier, the image set, the batch order,
+  ``reference`` or the code it runs, the seed, or the harness and its timing.
   Nor may it keep state outside its pass (files written in one pass and read
   in a later one, work done ahead of the run), leave processes running after
   its pass, or read anything prepared offline from the image set.

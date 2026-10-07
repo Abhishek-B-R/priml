@@ -125,7 +125,6 @@ LoaderThroughput.Config(
                 │       base_dir=PosixPath('/opt/scratch'),
                 │       working_dir=PosixPath('/opt/scratch')
                 ),
-                reference_digests='throughput_exp000_synthetic.sha256',
                 tolerance=None,
                 fields=['image', 'label'],
                 seed=0,
