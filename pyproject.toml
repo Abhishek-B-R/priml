@@ -3,7 +3,7 @@
 
 [project]
 name = "priml"
-version = "0.1.4"
+version = "0.1.5"
 description = "Malleable ML building blocks for training experiments."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -47,6 +47,8 @@ dependencies = [
     # analysis
     "numpy>=2.1",
     "scipy",
+    # ConvexTok's presolver.
+    "numba>=0.67",
     # nlp
     "rustbpe>=0.1.0",
     "tiktoken>=0.12.0",
@@ -60,8 +62,9 @@ dependencies = [
     # tensor utilities
     "einops",
     "einshape",
-    # config
-    "configgle>=1.3.7",
+    # config; 1.4.1 first ships LateBound and Fig.finalized(), which priml imports
+    "configgle>=1.4.1",
+    "msgspec>=0.22.0",
     # containers
     "wrapt",
     # misc
@@ -216,7 +219,7 @@ markers = [
     "network_together: reaches Together over the network",
     "network_wandb: reaches Weights & Biases over the network",
 ]
-addopts = "-m 'not ci_smoke and not cuda and not integration and not performance and not cluster and not slow' --durations=20 --dist=worksteal"
+addopts = "-m 'not ci_smoke and not cuda and not integration and not performance and not cluster and not slow' --durations=20 --dist=worksteal -p no:py_pglite"
 timeout = 60
 # "error" = treat all warnings as errors (same as -Werror).
 # Using filterwarnings instead of addopts so we can add exceptions.
@@ -324,8 +327,10 @@ extend-safe-fixes = [
     "F841",   # Remove unused local bindings.
     "PT006",  # Use tuple for pytest.mark.parametrize names.
     "PT007",  # Use tuple/list consistently for pytest values.
+    "PT018",  # Split composite assertions.
     "PYI034", # Annotate __enter__/__new__/__iadd__ returns as Self.
     "RET504", # Remove unnecessary local assignment directly before return.
+    "RUF007", # Prefer `itertools.pairwise()` over `zip()` when iterating over successive pairs.
     "SIM102", # Collapse nested if statements.
     "SIM105", # Use contextlib.suppress instead of try-except-pass.
     "TC",     # Type-checking import and annotation rewrites.
@@ -575,6 +580,12 @@ useLibraryCodeForTypes = false
 # `stubPath` (not `extraPaths`) is the one root that resolves ahead of an
 # installed package's inline types.
 stubPath = "typings"
+# typings/ is ALSO a source root so a stub package can ship a placeholder .py:
+# triton is linux-only (uv.lock `sys_platform == 'linux'`), so without this
+# every `import triton` fails `reportMissingModuleSource` on macOS, and an inline
+# suppression would fail `reportUnnecessaryTypeIgnoreComment` on linux. Stubs
+# still win over source, so no type changes. Mirrors [tool.ty.environment].
+extraPaths = ["typings"]
 # `rekursiv-ai-typeshed` (a `typecheck` dependency): the checkers' bundled stdlib
 # with `int`/`float` `__pow__` returning `float` rather than typeshed's `Any`,
 # which would otherwise make every `x ** 0.5` a `reportAny` violation.

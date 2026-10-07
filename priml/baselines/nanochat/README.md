@@ -40,8 +40,8 @@ these prepared 8K BPE inputs unchanged.
 `exp022` uses FlashAttention-4, Triton, BF16 weights, and prepared 16K Unigram
 rows. It targets a single high-memory NVIDIA GPU. Its default training budget is
 525 seconds for H-series GPUs, excluding compilation warmup and evaluation.
-For B200, uncomment the marked 300-second budget line in `exp022`; it updates
-both the training schedule and the loop's stop time.
+For B200, run `exp024`: `exp022` at a 300-second budget, applied to both the
+training schedule and the loop's stop time.
 
 The 16K experiments select ATen matrix multiplication inside the compiled
 model. This avoids large-matrix indexing errors observed with PyTorch 2.11
@@ -51,7 +51,7 @@ CUDA graphs and the fused attention and n-gram kernels remain enabled.
 Install FlashAttention-4 into the same environment as Priml:
 
 ```bash
-uv add flash-attn-4==4.0.0b29
+uv add flash-attn-4
 ```
 
 Inspect the preparation recipe, then build its inputs in a fresh directory:
@@ -94,7 +94,7 @@ the steps that you would get on a B200, but on on an H-series GPU.
 
 `exp004` starts from `exp000`; later factories inherit their predecessor.
 `exp004`–`exp022` default to 525 seconds. To reproduce the final experiment, `exp022`,
-on b200, override with `--override step.train_budget_sec=300.0 --override max_time=300.0`.
+on B200, run `exp024`, its 300-second fork.
 
 Δ BPB compares each recipe with its parent at the same budget; negative is
 better. `—` means no measured comparison is available.
@@ -159,7 +159,7 @@ better. `—` means no measured comparison is available.
 
 | Experiment | Change | Mean BPB | Δ BPB | Seeds |
 |---|---|---:|---:|---|
-| `exp022` | Zero-initialize memory tables | 0.887791 | — | 10 (42–51) |
+| `exp024` | `exp022` at a 300-second budget | 0.887791 | — | 10 (42–51) |
 
 ### References
 
@@ -178,7 +178,9 @@ better. `—` means no measured comparison is available.
 BPE experiments use the base evaluator. Unigram experiments replay the rows
 selected by the BPE reference tokenizer, preserving their source bytes and
 document boundaries. Padding and boundary tokens are excluded from scoring.
-A replay that exceeds the model context is rejected rather than truncated.
+A replay longer than the model context is never truncated: it continues in
+extra windows, each scoring only targets not yet scored, with context from its
+own row. The 16K Unigram rows all fit, so their archive has no such windows.
 
 `bpb` uses the reference evaluator's decoded-token byte denominator.
 `literal_bpb` uses the literal UTF-8 byte count. These denominators can differ

@@ -84,6 +84,7 @@ __all__ = [
     "KERNELS",
     "MEASURES",
     "PHASES",
+    "Axis",
     "Cost",
     "Device",
     "Index",
@@ -115,6 +116,7 @@ type Key = tuple[Axis, Axis, Axis, Axis]
 type Index = Axis | tuple[Axis] | tuple[Axis, Axis] | tuple[Axis, Axis, Axis]
 """Fewer axes than the table has, in any order: reads the sub-table."""
 
+_COST_AXES: Final = ("measure", "phase", "kernel", "dtype")
 MEASURES: Final = ("flops", "bytes")
 _REPORT_MEASURES: Final = (*MEASURES, "intensity")
 PHASES: Final = ("primal", "adjoint")
@@ -139,8 +141,9 @@ class Cost:
     a cell never written is zero. Index with axis values in any order -- each
     value names its own axis, since measures, phases, kernels and dtypes never
     collide -- and get the count when every axis is fixed, else the sub-table.
-    A combination no cell holds is an empty table, i.e. zero; only a value that
-    names no axis at all (``"gemm"``) is a ``KeyError``.
+    A combination no cell holds is an empty table, i.e. zero; a value that
+    names no axis at all (``"gemm"``), or two values on one axis, is a
+    ``KeyError`` -- empty table or not.
 
     The three ownership fields are not per cell: a slice owns nothing; they
     add under ``+`` and scale only by ``copies`` in :meth:`tile`.
@@ -189,8 +192,9 @@ class Cost:
             raise KeyError("'intensity' is a reporting-only measure")
         if not wanted:
             return self
+        _validate_axes(wanted)
         if not self.cells:
-            return Cost() if len(wanted) < 4 else 0
+            return Cost() if len(wanted) < len(_COST_AXES) else 0
         sample = next(iter(self.cells))
         fixed = {_axis_of(sample, want): want for want in wanted}
         if len(fixed) == len(sample):
@@ -260,7 +264,7 @@ class Cost:
 
     def sum(self) -> int:
         """Total over every cell."""
-        return sum(self.cells.values(), 0)
+        return sum(self.cells.values())
 
     def __add__(self, other: Cost) -> Cost:
         merged = dict(self.cells)
@@ -336,11 +340,7 @@ class Report:
             self,
             "cells",
             MappingProxyType(
-                {
-                    key: float(value)
-                    for key, value in self.cells.items()
-                    if value != 0 or math.isnan(value)
-                },
+                {key: float(value) for key, value in self.cells.items() if value != 0},
             ),
         )
 
@@ -355,8 +355,11 @@ class Report:
     def _select(self, wanted: list[object]) -> float | Report:
         if not wanted:
             return self
+        _validate_axes(wanted)
+        # An empty report has no keys to read its width from; the derived
+        # reports (``intensity``, ``utilization``) are phase x kernel x dtype.
         if not self.cells:
-            return Report() if len(wanted) < 3 else 0.0
+            return Report() if len(wanted) < len(_COST_AXES) - 1 else 0.0
         sample = next(iter(self.cells))
         fixed = {_axis_of(sample, want): want for want in wanted}
         if len(fixed) == len(sample):
@@ -423,9 +426,6 @@ def resolve_dtype(dtype: torch.dtype | None) -> torch.dtype:
     return torch.get_default_dtype() if dtype is None else dtype
 
 
-_FUNCTION_COSTS: dict[object, Callable[..., Cost]] = {}
-
-
 def cost(config: object, **kwargs: object) -> Cost:
     """Cost one complete invocation, forwarding the bus unchanged.
 
@@ -446,14 +446,11 @@ def cost(config: object, **kwargs: object) -> Cost:
     # importing it here would close an import cycle.
     original: object = config
     method = getattr(original, "cost", None)
+    # Unnarrowed by the ``isinstance(partial)`` below, which would leave
+    # ``partial[Unknown]`` in the name lookup.
     name_target: object = original
-    if not callable(method):
-        try:
-            method = _FUNCTION_COSTS.get(original)
-        except TypeError:
-            method = None
     if not callable(method) and isinstance(original, functools.partial):
-        method = _FUNCTION_COSTS.get(cast(object, original.func))
+        method = getattr(cast(object, original.func), "cost", None)
     if not callable(method):
         name = getattr(name_target, "__qualname__", type(name_target).__qualname__)
         raise TypeError(
@@ -477,8 +474,6 @@ def intensity(execution: Cost) -> Report:
     """
     flops = execution["flops"]
     moved = execution["bytes"]
-    assert isinstance(flops, Cost)
-    assert isinstance(moved, Cost)
     return Report(
         cells={
             key: _div(float(value), float(moved.cells.get(key, 0)))
@@ -503,12 +498,15 @@ def set_cost[**P, R](
         per-element case.
 
     Returns:
-      decorator: Returns the original function unchanged.
+      decorator: Returns the original function with ``cost_fn`` stored as its
+        ``cost`` attribute, which :func:`cost` reads like a config's method.
 
     """
 
     def decorate(function: Callable[P, R]) -> Callable[P, R]:
-        _FUNCTION_COSTS[function] = cost_fn
+        # On the function, not in a registry: a registry would keep every
+        # decorated closure alive for the life of the process.
+        vars(function)["cost"] = cost_fn
         return function
 
     return decorate
@@ -745,7 +743,10 @@ def reduction_cost(
 
 type Device = Literal[
     "a100",
+    "a100-40g",
+    "a100-80g-pcie",
     "h100",
+    "h100-pcie",
     "h200",
     "b200",
     "rtx5050",
@@ -760,12 +761,30 @@ type Device = Literal[
 # ``float32`` tensor entry is TF32, what a matmul runs at under
 # ``torch.backends.cuda.matmul.allow_tf32``.
 #
+# A bare name carries the form factor the entry above was sourced from, so
+# ``"a100"`` stays the 80GB SXM and ``"h100"`` stays SXM5. SXM parts move more
+# memory per second than the PCIe board of the same GPU, so naming the form is
+# what selects the right ridge: a bare name is the fastest member of the family,
+# and asking for a slower one is how you get the right answer for the card that
+# is actually in the machine.
+#
 # A100 80GB SXM: https://www.nvidia.com/en-us/data-center/a100/ "Specifications";
 #   the starred SXM column is "with sparsity", so each is halved (TF32 312 -> 156,
 #   BF16 624 -> 312, INT8 1248 -> 624). No FP8. FP64 TC 19.5; FP32 CUDA 19.5.
+# A100 80GB PCIe and A100 40GB (PCIe or SXM): NVIDIA A100 datasheet --
+#   https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-us-nvidia-1758950-r4-web.pdf
+#   1.935 TB/s HBM2e and 1.555 TB/s HBM2. Both share the die and tensor rates of
+#   the 80GB SXM; compute is unaffected by the form factor, so only the bandwidth
+#   differs.
 # H100 SXM5: NVIDIA H100 Tensor Core GPU datasheet, "no sparsity" column
 #   (FP64 TC 67 is not used; the vector rate is FP32 CUDA 67). Mirrored at
 #   https://www.spheron.network/blog/nvidia-h100-specs/ "Throughput by Precision".
+# H100 PCIe: the same datasheet's PCIe column --
+#   https://www.arrow.com/globalecs-media/15wfdnib/h100-datasheet-2430615.pdf
+#   -- whose starred tensor figures are "with sparsity", so each is halved (TF32
+#   756 -> 378, BF16 1513 -> 756.5, FP8/INT8 3026 -> 1513); FP64 26, FP32 CUDA
+#   51. The board clocks lower than SXM5, so its rates are NOT the SXM5 rates.
+#   2.0 TB/s HBM2e is 60% of the SXM5 bandwidth.
 # H200 SXM: same GH100 die and rates; 4.8 TB/s HBM3e from the same source.
 # B200: HGX B200 PCF summary (8 GPUs) divided by 8 --
 #   https://images.nvidia.com/aem-dam/Solutions/documents/HGX-B200-PCF-Summary.pdf
@@ -801,6 +820,28 @@ _DEVICES: Final[Mapping[Device, tuple[float, Mapping[torch.dtype, float], float]
         },
         19.5,
     ),
+    "a100-40g": (
+        1.555,
+        {
+            torch.float64: 19.5,
+            torch.float32: 156,
+            torch.bfloat16: 312,
+            torch.float16: 312,
+            torch.int8: 624,
+        },
+        19.5,
+    ),
+    "a100-80g-pcie": (
+        1.935,
+        {
+            torch.float64: 19.5,
+            torch.float32: 156,
+            torch.bfloat16: 312,
+            torch.float16: 312,
+            torch.int8: 624,
+        },
+        19.5,
+    ),
     "h100": (
         3.35,
         {
@@ -813,6 +854,19 @@ _DEVICES: Final[Mapping[Device, tuple[float, Mapping[torch.dtype, float], float]
             torch.int8: 1979,
         },
         67,
+    ),
+    "h100-pcie": (
+        2.0,
+        {
+            torch.float64: 26,
+            torch.float32: 378,
+            torch.bfloat16: 756.5,
+            torch.float16: 756.5,
+            torch.float8_e4m3fn: 1513,
+            torch.float8_e5m2: 1513,
+            torch.int8: 1513,
+        },
+        51,
     ),
     "h200": (
         4.8,
@@ -909,6 +963,11 @@ def peak() -> Report:
     ``peak()["h100", torch.bfloat16]`` is one device at one dtype, measures by
     kernel. Sums across devices or dtypes rank alternatives and mean nothing.
 
+    A device name may name its form factor: ``"h100-pcie"`` and ``"a100-40g"``
+    price the board in the machine rather than the fastest member of the family.
+    A bare name is the SXM part for the datacenter GPUs, which is the form the
+    table was sourced from.
+
     Returns:
       peak: The floating datasheet table, owning nothing.
 
@@ -957,15 +1016,27 @@ def utilization(
     for key, flops in cost["flops"].cells.items():
         _, kernel, dtype = key
         compute = ceiling.get((dtype, "flops", kernel), 0.0)
-        bandwidth = ceiling.get((dtype, "bytes", kernel), 0.0)
         if math.isinf(duration_sec):
             ridge = ceiling.get((dtype, "intensity", kernel), 0.0)
-            cells[key] = _div(ratios.get(key, math.inf), ridge)
+            cells[key] = _div(ratios[key], ridge)
             continue
-        memory = ratios.get(key, math.inf) * bandwidth
+        bandwidth = ceiling.get((dtype, "bytes", kernel), 0.0)
+        memory = ratios[key] * bandwidth
         achieved = flops / duration_sec
         cells[key] = _div(achieved, min(compute, memory))
     return Report(cells=cells)
+
+
+# Checked before any cell is read, so an empty table refuses ``"gemm"`` as a full one
+# does, and ``("primal", "adjoint")`` cannot let the last one win.
+def _validate_axes(wanted: list[object]) -> None:
+    """Raise unless each value names an axis, and no axis is named twice."""
+    kinds: set[str] = set()
+    for want in wanted:
+        kind = _kind(want)
+        if kind in kinds:
+            raise KeyError(f"{want!r} names the {kind} axis twice.")
+        kinds.add(kind)
 
 
 def _axis_of(key: tuple[object, ...], value: object) -> int:
@@ -1038,7 +1109,7 @@ def _grid(
     measures: list[object] = (
         [m for m in _REPORT_MEASURES if any(k[axis] == m for k in cells)]
         if axis is not None
-        else [""]
+        else [None]
     )
     derive_intensity = derive_intensity and axis is not None
     if derive_intensity:
@@ -1055,7 +1126,9 @@ def _grid(
     order = (*PHASES, *KERNELS)
     labels = sorted(
         {tuple(str(k[i]) for i in row_axes) for k in cells},
-        key=lambda label: tuple(order.index(x) if x in order else -1 for x in label),
+        key=lambda label: tuple(
+            (x in order, order.index(x) if x in order else x) for x in label
+        ),
     )
     depth = max(1, *(len(label) for label in labels))
     # The measure and the column axis stack as two header lines rather than
@@ -1077,13 +1150,13 @@ def _grid(
     totals: list[int | float] = [0] * (len(measures) * len(columns_axis))
     values_by_row: list[tuple[tuple[str, ...], list[int | float]]] = []
     for label in labels:
-        fixed = dict(zip(row_axes, label, strict=True))
+        fixed = {axis: label[i] for i, axis in enumerate(row_axes)}
         values = [
             lookup.get(_key(width, fixed, (axis, m), (column_axis, d)), 0)
             for m in measures
             for d in columns_axis
         ]
-        totals = [t + v for t, v in zip(totals, values, strict=True)]
+        totals = [total + values[i] for i, total in enumerate(totals)]
         values_by_row.append((label, values))
     if len(labels) > 1 and (derive_intensity or "intensity" not in measures):
         values_by_row.append((("total",), totals))
@@ -1165,4 +1238,6 @@ def _div(numerator: float, denominator: float) -> float:
         return numerator / denominator
     if numerator == 0 or math.isnan(numerator):
         return math.nan
-    return math.copysign(math.inf, numerator) * math.copysign(1, denominator)
+    if math.copysign(1, denominator) == -1:
+        return -math.copysign(math.inf, numerator)
+    return math.copysign(math.inf, numerator)
