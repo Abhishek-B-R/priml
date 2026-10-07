@@ -342,7 +342,8 @@ def test_run_logs_the_score_and_the_exact_tier(
     cfg.num_repeats = 1
 
     with caplog.at_level(
-        logging.INFO, logger="priml.baselines.imagenet.throughput.throughput"
+        logging.INFO,
+        logger="priml.baselines.imagenet.throughput.throughput",
     ):
         cfg.make().run("--passthrough")
 
@@ -378,7 +379,8 @@ def test_the_accurate_idct_fails_exact_and_passes_a_tier_that_says_so(
     cfg.tolerance = PixelTolerance.Config(max_abs_diff=255, max_fraction_differing=1)
 
     with caplog.at_level(
-        logging.INFO, logger="priml.baselines.imagenet.throughput.throughput"
+        logging.INFO,
+        logger="priml.baselines.imagenet.throughput.throughput",
     ):
         cfg.make().run()
 

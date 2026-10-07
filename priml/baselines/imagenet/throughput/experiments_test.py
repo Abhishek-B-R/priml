@@ -8,12 +8,12 @@ itself, or the number it reports belongs to some other recipe.
 from __future__ import annotations
 
 from configgle.pprinting import pformat
-from configgle.testing import assert_pprint_golden
 
 from priml.baselines.imagenet import experiments
 from priml.baselines.imagenet.throughput.experiments import exp000
 from priml.data.pipeline.dataset import DataPipeline
 from priml.data.sources.extracted_imagenet import ExtractedImageNetSource
+from priml.testing.golden import assert_pprint_golden
 
 
 def test_exp000_pprint() -> None:
