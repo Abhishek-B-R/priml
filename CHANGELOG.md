@@ -3,6 +3,24 @@
 All notable priml changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added
+
+- `cost(..., context_len=...)` prices a step after `context_len` cached
+  tokens: `Attention`, `GatedAttention`, and `MultiStreamAttention` attend
+  their `seq_len` queries to `context_len + seq_len` keys. One decode step is
+  `cost(model, seq_len=1, context_len=T, ...)`, and `utilization` places it
+  against a device's ridge. `MultiHeadLatentAttention` raises
+  `NotImplementedError` for a cached step.
+- `priml.cost.nbytes` returns the bytes a count of values occupies at a dtype.
+
+### Fixed
+
+- Costs at `torch.float4_e2m1fn_x2` count two values per byte. Every byte
+  count multiplied by `itemsize`, which is one byte per two packed fp4 values,
+  so fp4 traffic and cache state were doubled.
+
 ## 0.1.6 - 2026-10-07
 
 ### Added
