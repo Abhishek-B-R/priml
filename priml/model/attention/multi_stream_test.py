@@ -19,7 +19,7 @@ from priml.model.attention.attention import (
     Attention,
     AttentionProjections,
 )
-from priml.model.attention.flash3 import Flash3Attention
+from priml.model.attention.flash4 import Flash4Attention
 from priml.model.attention.kernel import (
     SdpaFused,
     SdpaNaive,
@@ -335,6 +335,33 @@ def test_multi_stream_cache():
     assert y1.shape == (2, 12, 64)
     assert caches[0].length == 8
     assert caches[1].length == 12
+
+
+def test_multi_stream_cache_defaults_to_the_block_device_and_dtype() -> None:
+    module = MultiStreamAttention.Config(
+        channels_in=8,
+        num_heads=4,
+        channels_head=3,
+        num_streams=2,
+    ).make()
+    module.to(device="meta", dtype=torch.bfloat16)
+
+    caches = module.alloc_kv_cache(batch=5, max_seq=7)
+
+    for state in (tensor for cache in caches for tensor in (cache.k, cache.v)):
+        assert state.device.type == "meta"
+        assert state.dtype is torch.bfloat16
+
+
+def test_multi_stream_rejects_zero_kv_heads() -> None:
+    config = MultiStreamAttention.Config(
+        channels_in=8,
+        num_heads=2,
+        num_heads_kv=0,
+        num_streams=3,
+    )
+    with pytest.raises(ValueError, match="num_heads_kv"):
+        config.make()
 
 
 def test_multi_stream_cache_allocates_for_an_uncached_stream() -> None:
@@ -1324,6 +1351,33 @@ def test_multi_stream_cost_matches_torch_per_stream_token() -> None:
     )
 
 
+@pytest.mark.parametrize("seq_len", [1, 8])
+def test_multi_stream_cached_step_cost_matches_torch(seq_len: int) -> None:
+    """Each stream's queries attend to every stream's cached and new keys.
+
+    ``seq_len=1`` is one decode step, which emits one token per stream; 8 is
+    a chunk.
+    """
+    assert_cost_matches_torch(
+        MultiStreamAttention.Config(
+            channels_in=7,
+            num_heads=4,
+            num_heads_kv=2,
+            channels_head=5,
+            num_streams=3,
+            attn_kernel=SdpaNaive.Config(),
+        ),
+        build_input=lambda: tuple(
+            torch.randn(6, seq_len, 7, requires_grad=True) for _ in range(3)
+        ),
+        run=partial(_step_after_cache, context_len=9),
+        seq_len=seq_len,
+        batch_size=6,
+        dtype=None,
+        context_len=9,
+    )
+
+
 def test_multi_stream_cost_counts_shared_norms_once() -> None:
     config = MultiStreamAttention.Config(
         channels_in=16,
@@ -1444,7 +1498,7 @@ def test_multi_stream_cost_forwards_the_bus_to_the_kernel(explicit: bool) -> Non
         channels_in=16,
         num_heads=2,
         channels_head=8,
-        attn_kernel=Flash3Attention.Config(),
+        attn_kernel=Flash4Attention.Config(),
     )
     if explicit:
         config.streams = [AttentionProjections.Config(), AttentionProjections.Config()]
@@ -1496,7 +1550,25 @@ def test_multistream_independent_qk_norm_scales_are_each_read_once() -> None:
     )
 
 
+def _step_after_cache(
+    module: nn.Module,
+    xs: tuple[Tensor, ...],
+    *,
+    context_len: int,
+) -> Tensor:
+    """Attend ``xs`` after ``context_len`` tokens of fresh, zeroed stream caches."""
+    assert isinstance(module, MultiStreamAttention)
+    lead = xs[0]
+    states = module.alloc_kv_cache(
+        batch=lead.shape[0],
+        max_seq=context_len + lead.shape[-2],
+    )
+    for state in states:
+        state.length = state.seen = context_len
+    return torch.stack(module(list(xs), cache=_layer_cache(module, states))).sum()
+
+
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

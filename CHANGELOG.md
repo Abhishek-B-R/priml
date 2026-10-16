@@ -3,6 +3,87 @@
 All notable priml changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added
+
+- `cost(..., context_len=...)` prices a step after `context_len` cached
+  tokens: `Attention`, `GatedAttention`, and `MultiStreamAttention` attend
+  their `seq_len` queries to `context_len + seq_len` keys. One decode step is
+  `cost(model, seq_len=1, context_len=T, ...)`, and `utilization` places it
+  against a device's ridge. `MultiHeadLatentAttention` raises
+  `NotImplementedError` for a cached step.
+- `priml.cost.nbytes` returns the bytes a count of values occupies at a dtype.
+
+### Changed
+
+- `Cost` and `Report` carry their `axes`, so a slice answers by the axes it
+  kept whether or not it holds a cell. An empty slice used to accept any axis
+  and read a sub-table where a full one read zero.
+- Naming every axis of a sub-table, such as `cost["flops"]["primal",
+  "matmul", torch.bfloat16]`, is a `KeyError`; read it with `.sum()`, or name
+  all four axes on the full table. A three-value `Report` lookup is typed
+  `float | Report`: a three-axis report reads a value, `peak()` a sub-table.
+
+### Fixed
+
+- Costs at `torch.float4_e2m1fn_x2` count two values per byte. Every byte
+  count multiplied by `itemsize`, which is one byte per two packed fp4 values,
+  so fp4 traffic and cache state were doubled.
+
+## 0.1.6 - 2026-10-07
+
+### Added
+
+- `priml.data.passes.Passes` wraps a function that draws one pass of
+  batches, so a training loader iterates afresh at every epoch boundary
+  instead of handing back an exhausted generator.
+- `priml.runtime.best_device()` returns the best accelerator this process
+  can use, else CPU.
+- `priml.testing.golden.assert_pprint_golden(test_file=..., name=...,
+  config=...)` compares a config's full finalized pprint with a
+  test-local golden, with an optional `normalize`; it replaces
+  `configgle.testing.assert_pprint_golden`. `priml.testing.regenerate`
+  adds the `--regenerate-golden` pytest option.
+- ARC evaluation can write ranked per-task pass@k JSON.
+- An ETTh1 DLinear forecasting baseline (`priml.baselines.etth1`).
+
+### Changed
+
+- **Breaking:** runtime `device` defaults to `None`, which selects the best
+  usable accelerator, else CPU. The `"auto"` spelling is gone:
+  `get_device("auto")` now raises. `get_device(None)` returns the device
+  being built under (`torch.get_default_device()`).
+- A CUDA build on a machine with no usable GPU resolves the default device
+  to CPU instead of failing on its first allocation. Processors and model
+  loaders default to their build-time device; explicitly configured
+  devices are kept.
+- **Breaking:** `RoPE`'s `dtype` defaults to `torch.float32` (was `None`).
+  Fixed frequencies stay float32 through module casts; learned frequencies
+  follow the module dtype. Numerics are unchanged.
+- **Breaking:** the vendored `priml.lib.custom_json` is replaced by
+  `priml.lib.codec`. Dataset metadata, manifests and training checkpoints
+  are read with its typed parser.
+- Reductions normalize their axes and reject invalid dimensions; dataset
+  recipes, resume state, model configs and optimizer inputs are validated
+  up front.
+- Development: the bundled typeshed patch and pytest options are updated, and
+  a worker-count helper is vendored as `priml.lib.worker_count`. Runtime
+  dependencies and the supported Python versions (3.12+) are unchanged.
+
+### Fixed
+
+- Transformer mixers are no longer passed an absent cache.
+- A missing false-accept count is treated as zero during evaluation.
+- Fixes to attention, sampling, metrics, image processing, checkpoint
+  handling, and parallel data and distributed workflows.
+
+### Removed
+
+- **Breaking:** `priml.testing.fixtures.get_device`; use
+  `priml.runtime.best_device()`.
+- `Checkpointer.has_pending_write`.
+
 ## 0.1.5 - 2026-10-03
 
 ### Changed

@@ -33,7 +33,9 @@ Counting policy:
   MFU, not HFU.
 - ``bytes`` and ``bytes_state`` hold bytes, not element counts. Each leaf
   costs its tensors at its own storage dtype (``None`` is torch's default)
-  and tags every cell with it, so traffic can be read per dtype.
+  and tags every cell with it, so traffic can be read per dtype. Bytes come
+  from :func:`nbytes`, never a bare ``itemsize``, which counts a packed fp4
+  value at a whole byte.
 - Traffic is the analytical unfused algorithm's minimum tensor operand I/O:
   each primitive reads its inputs and writes its outputs once. Intermediates
   between primitives count even when a fused implementation keeps them on chip.
@@ -98,6 +100,7 @@ __all__ = [
     "intensity",
     "map_cost",
     "matmul_cost",
+    "nbytes",
     "peak",
     "reduction_cost",
     "resolve_dtype",
@@ -112,11 +115,12 @@ type Phase = Literal["primal", "adjoint"]
 type Kernel = Literal["matmul", "elementwise", "reduction", "selection", "sort"]
 type Axis = str | torch.dtype
 type Key = tuple[Axis, Axis, Axis, Axis]
-"""Every axis of a four-axis table named, in any order: reads one integer."""
+"""Every axis of a four-axis table named, in any order: reads one value."""
 type Index = Axis | tuple[Axis] | tuple[Axis, Axis] | tuple[Axis, Axis, Axis]
-"""Fewer axes than the table has, in any order: reads the sub-table."""
+"""Fewer than four axes, in any order: reads a sub-table, or a three-axis report's value."""
 
 _COST_AXES: Final = ("measure", "phase", "kernel", "dtype")
+_REPORT_AXES: Final = ("phase", "kernel", "dtype")
 MEASURES: Final = ("flops", "bytes")
 _REPORT_MEASURES: Final = (*MEASURES, "intensity")
 PHASES: Final = ("primal", "adjoint")
@@ -140,10 +144,12 @@ class Cost:
     ``cells`` is a ``measure x phase x kernel x dtype`` grid of integer counts;
     a cell never written is zero. Index with axis values in any order -- each
     value names its own axis, since measures, phases, kernels and dtypes never
-    collide -- and get the count when every axis is fixed, else the sub-table.
-    A combination no cell holds is an empty table, i.e. zero; a value that
-    names no axis at all (``"gemm"``), or two values on one axis, is a
-    ``KeyError`` -- empty table or not.
+    collide -- and get the count when all four are named, else the sub-table
+    over the axes left. A combination no cell holds is an empty table, i.e.
+    zero. A sub-table keeps its ``axes``, so it answers as a full one does,
+    empty or not: a value that names no axis it has (``"gemm"``), or two
+    values on one axis, is a ``KeyError``, and so is naming every axis of a
+    sub-table, whose count is its :meth:`sum`.
 
     The three ownership fields are not per cell: a slice owns nothing; they
     add under ``+`` and scale only by ``copies`` in :meth:`tile`.
@@ -153,6 +159,9 @@ class Cost:
         default_factory=dict[tuple[object, ...], int],
     )
     """Nonzero integer invocation counts; zeros are dropped on construction."""
+
+    axes: tuple[str, ...] = field(default=(), compare=False)
+    """Each key position's axis; read from the cells, or all four when empty."""
 
     params: int = 0
     """Parameters the module owns."""
@@ -171,6 +180,8 @@ class Cost:
         _validate_nonnegative_integer("params", self.params)
         _validate_nonnegative_integer("params_active", self.params_active)
         _validate_nonnegative_integer("bytes_state", self.bytes_state)
+        if not self.axes:
+            object.__setattr__(self, "axes", _axes_of(self.cells, _COST_AXES))
         object.__setattr__(
             self,
             "cells",
@@ -192,20 +203,17 @@ class Cost:
             raise KeyError("'intensity' is a reporting-only measure")
         if not wanted:
             return self
-        _validate_axes(wanted)
-        if not self.cells:
-            return Cost() if len(wanted) < len(_COST_AXES) else 0
-        sample = next(iter(self.cells))
-        fixed = {_axis_of(sample, want): want for want in wanted}
-        if len(fixed) == len(sample):
-            return self.cells.get(tuple(fixed[i] for i in range(len(sample))), 0)
-        keep = [i for i in range(len(sample)) if i not in fixed]
+        fixed = _fixed_positions(self.axes, wanted, reads=len(_COST_AXES))
+        if len(fixed) == len(self.axes):
+            return self.cells.get(tuple(fixed[i] for i in range(len(self.axes))), 0)
+        keep = [i for i in range(len(self.axes)) if i not in fixed]
         return Cost(
             cells={
                 tuple(key[i] for i in keep): value
                 for key, value in self.cells.items()
                 if all(key[i] == want for i, want in fixed.items())
             },
+            axes=tuple(self.axes[i] for i in keep),
         )
 
     def only(self, value: Axis) -> Cost:
@@ -227,12 +235,10 @@ class Cost:
 
         """
         want = _canonical(value)
-        if not self.cells:
-            _kind(want)
-            return Cost()
-        axis = _axis_of(next(iter(self.cells)), want)
+        axis = _position(self.axes, want)
         return Cost(
             cells={key: v for key, v in self.cells.items() if key[axis] == want},
+            axes=self.axes,
         )
 
     def relabel(self, value: Axis) -> Cost:
@@ -252,15 +258,12 @@ class Cost:
 
         """
         want = _canonical(value)
-        if not self.cells:
-            _kind(want)
-            return Cost()
-        axis = _axis_of(next(iter(self.cells)), want)
+        axis = _position(self.axes, want)
         merged: dict[tuple[object, ...], int] = {}
         for key, cell_value in self.cells.items():
             moved = (*key[:axis], want, *key[axis + 1 :])
             merged[moved] = merged.get(moved, 0) + cell_value
-        return Cost(cells=merged)
+        return Cost(cells=merged, axes=self.axes)
 
     def sum(self) -> int:
         """Total over every cell."""
@@ -305,6 +308,7 @@ class Cost:
             params=copies * self.params,
             params_active=copies * self.params_active,
             bytes_state=self.bytes_state * repetitions,
+            axes=self.axes,
         )
 
     @override
@@ -328,14 +332,25 @@ class Cost:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Report:
-    """Floating reporting table derived from concrete execution counts."""
+    """Floating reporting table derived from concrete execution counts.
+
+    Indexed as :class:`Cost` is. The derived reports (:func:`intensity`,
+    :func:`utilization`) and one device's ceilings (``peak()["h100"]``) have
+    three axes and read a value when all three are named; :func:`peak` adds a
+    device axis, so it reads one at four and a sub-table at three.
+    """
 
     cells: Mapping[tuple[object, ...], float] = field(
         default_factory=dict[tuple[object, ...], float],
     )
     """Nonzero reporting values; zeros are dropped on construction."""
 
+    axes: tuple[str, ...] = field(default=(), compare=False)
+    """Each key position's axis; read from the cells, or a derived report's when empty."""
+
     def __post_init__(self) -> None:
+        if not self.axes:
+            object.__setattr__(self, "axes", _axes_of(self.cells, _REPORT_AXES))
         object.__setattr__(
             self,
             "cells",
@@ -347,7 +362,9 @@ class Report:
     @overload
     def __getitem__(self, index: Key) -> float: ...
     @overload
-    def __getitem__(self, index: Index) -> Report: ...
+    def __getitem__(self, index: tuple[Axis, Axis, Axis]) -> float | Report: ...
+    @overload
+    def __getitem__(self, index: Axis | tuple[Axis] | tuple[Axis, Axis]) -> Report: ...
     def __getitem__(self, index: Key | Index) -> float | Report:
         parts = index if isinstance(index, tuple) else (index,)
         return self._select([_canonical(part) for part in parts])
@@ -355,25 +372,20 @@ class Report:
     def _select(self, wanted: list[object]) -> float | Report:
         if not wanted:
             return self
-        _validate_axes(wanted)
-        # An empty report has no keys to read its width from; the derived
-        # reports (``intensity``, ``utilization``) are phase x kernel x dtype.
-        if not self.cells:
-            return Report() if len(wanted) < len(_COST_AXES) - 1 else 0.0
-        sample = next(iter(self.cells))
-        fixed = {_axis_of(sample, want): want for want in wanted}
-        if len(fixed) == len(sample):
+        fixed = _fixed_positions(self.axes, wanted, reads=len(_REPORT_AXES))
+        if len(fixed) == len(self.axes):
             return self.cells.get(
-                tuple(fixed[index] for index in range(len(sample))),
+                tuple(fixed[index] for index in range(len(self.axes))),
                 0.0,
             )
-        keep = [index for index in range(len(sample)) if index not in fixed]
+        keep = [index for index in range(len(self.axes)) if index not in fixed]
         return Report(
             cells={
                 tuple(key[index] for index in keep): value
                 for key, value in self.cells.items()
                 if all(key[index] == want for index, want in fixed.items())
             },
+            axes=tuple(self.axes[index] for index in keep),
         )
 
     def sum(self) -> float:
@@ -416,7 +428,7 @@ def traffic(
     return Cost(
         cells={
             ("flops", phase, kernel, dt): flops,
-            ("bytes", phase, kernel, dt): elements * dt.itemsize,
+            ("bytes", phase, kernel, dt): nbytes(elements, dt),
         },
     )
 
@@ -424,6 +436,25 @@ def traffic(
 def resolve_dtype(dtype: torch.dtype | None) -> torch.dtype:
     """Return ``dtype``, or torch's default when a config left it ``None``."""
     return torch.get_default_dtype() if dtype is None else dtype
+
+
+def nbytes(elements: int, dtype: torch.dtype | None) -> int:
+    """Return the bytes ``elements`` values of ``dtype`` occupy.
+
+    ``torch.float4_e2m1fn_x2`` packs two values into its one-byte element, so
+    ``itemsize`` alone counts fp4 at twice its size.
+
+    Args:
+      elements: Values stored, not storage elements.
+      dtype: Storage dtype; ``None`` is torch's default.
+
+    Returns:
+      nbytes: Whole storage elements' bytes; a partial element takes a whole one.
+
+    """
+    dt = resolve_dtype(dtype)
+    per_element = 2 if dt == torch.float4_e2m1fn_x2 else 1
+    return -(-elements // per_element) * dt.itemsize
 
 
 def cost(config: object, **kwargs: object) -> Cost:
@@ -479,6 +510,7 @@ def intensity(execution: Cost) -> Report:
             key: _div(float(value), float(moved.cells.get(key, 0)))
             for key, value in flops.cells.items()
         },
+        axes=flops.axes,
     )
 
 
@@ -600,12 +632,11 @@ def matmul_cost(
     if dequant_flops and not weight_bytes:
         raise ValueError("dequant_flops needs a packed matrix; set weight_bytes.")
     dt = resolve_dtype(dtype)
-    s = dt.itemsize
     products = channels_in * channels_out
     biases = channels_out if bias else 0
     params = (products if weight else 0) + biases
-    stored = weight_bytes or s * products
-    moved = s * rows * (channels_in + channels_out) + stored
+    stored = weight_bytes or nbytes(products, dt)
+    moved = nbytes(rows * (channels_in + channels_out), dt) + stored
     return Cost(
         cells={
             ("flops", "primal", "matmul", dt): 2 * rows * products,
@@ -614,9 +645,12 @@ def matmul_cost(
             ("flops", "adjoint", "matmul", dt): 4 * rows * products,
             ("flops", "adjoint", "reduction", dt): biases * (rows - 1),
             ("bytes", "primal", "matmul", dt): moved,
-            ("bytes", "primal", "elementwise", dt): s * (2 * rows * biases + biases),
+            ("bytes", "primal", "elementwise", dt): nbytes(
+                2 * rows * biases + biases,
+                dt,
+            ),
             ("bytes", "adjoint", "matmul", dt): 2 * moved,
-            ("bytes", "adjoint", "reduction", dt): s * (rows * biases + biases),
+            ("bytes", "adjoint", "reduction", dt): nbytes(rows * biases + biases, dt),
         },
         params=params,
         params_active=params,
@@ -679,21 +713,22 @@ def elementwise_cost(
     if rows < 1:
         raise ValueError("rows must be at least one.")
     dt = resolve_dtype(dtype)
-    s = dt.itemsize
     return Cost(
         cells={
             ("flops", "primal", "elementwise", dt): primal,
             ("flops", "adjoint", "elementwise", dt): adjoint,
             ("flops", "adjoint", "reduction", dt): params * (rows - 1),
-            ("bytes", "primal", "elementwise", dt): s
-            * (rows * channels * (inputs + outputs) + params),
-            ("bytes", "adjoint", "elementwise", dt): s
-            * (
+            ("bytes", "primal", "elementwise", dt): nbytes(
+                rows * channels * (inputs + outputs) + params,
+                dt,
+            ),
+            ("bytes", "adjoint", "elementwise", dt): nbytes(
                 rows * channels * (adjoint_inputs + adjoint_outputs)
                 + rows * params
-                + params
+                + params,
+                dt,
             ),
-            ("bytes", "adjoint", "reduction", dt): s * (rows * params + params),
+            ("bytes", "adjoint", "reduction", dt): nbytes(rows * params + params, dt),
         },
         params=params,
         params_active=params,
@@ -735,8 +770,10 @@ def reduction_cost(
                 0,
                 input_elements - output_groups,
             ),
-            ("bytes", phase, "reduction", dt): dt.itemsize
-            * (input_elements + output_groups),
+            ("bytes", phase, "reduction", dt): nbytes(
+                input_elements + output_groups,
+                dt,
+            ),
         },
     )
 
@@ -1009,11 +1046,17 @@ def utilization(
       ratio: At ``(phase, kernel, dtype)`` keys, owning nothing; ``inf`` where
         the device lists no peak for the cell.
 
+    Raises:
+      ValueError: ``duration_sec`` is not positive.
+
     """
+    if math.isnan(duration_sec) or duration_sec <= 0:
+        raise ValueError(f"duration_sec must be positive; got {duration_sec}.")
     ceiling = (peak()[device] if isinstance(device, str) else device).cells
     ratios = intensity(cost).cells
+    executed = cost["flops"]
     cells: dict[tuple[object, ...], float] = {}
-    for key, flops in cost["flops"].cells.items():
+    for key, flops in executed.cells.items():
         _, kernel, dtype = key
         compute = ceiling.get((dtype, "flops", kernel), 0.0)
         if math.isinf(duration_sec):
@@ -1024,7 +1067,7 @@ def utilization(
         memory = ratios[key] * bandwidth
         achieved = flops / duration_sec
         cells[key] = _div(achieved, min(compute, memory))
-    return Report(cells=cells)
+    return Report(cells=cells, axes=executed.axes)
 
 
 # Checked before any cell is read, so an empty table refuses ``"gemm"`` as a full one
@@ -1039,12 +1082,40 @@ def _validate_axes(wanted: list[object]) -> None:
         kinds.add(kind)
 
 
-def _axis_of(key: tuple[object, ...], value: object) -> int:
-    """Return the position in ``key`` whose axis holds values like ``value``."""
-    for i, have in enumerate(key):
-        if _kind(have) == _kind(value):
-            return i
-    raise KeyError(f"{value!r} names no axis of a {len(key)}-axis table.")
+# A table with fewer than ``reads`` axes is a sub-table, and naming all of them is
+# refused: its count is its sum, and a scalar there would contradict the type the
+# lookup's length promises.
+def _fixed_positions(
+    axes: tuple[str, ...],
+    wanted: list[object],
+    *,
+    reads: int,
+) -> dict[int, object]:
+    """Return each wanted value keyed by its axis's position in ``axes``."""
+    _validate_axes(wanted)
+    fixed = {_position(axes, want): want for want in wanted}
+    if len(fixed) == len(axes) < reads:
+        raise KeyError(
+            f"{tuple(wanted)!r} names every axis of a sub-table; read its count "
+            "with .sum().",
+        )
+    return fixed
+
+
+def _position(axes: tuple[str, ...], value: object) -> int:
+    """Return the position of the axis that holds values like ``value``."""
+    kind = _kind(value)
+    if kind not in axes:
+        raise KeyError(f"{value!r} names no axis of a {len(axes)}-axis table.")
+    return axes.index(kind)
+
+
+def _axes_of(
+    cells: Mapping[tuple[object, ...], object],
+    empty: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Return the axis at each key position, or ``empty`` for a table with no cells."""
+    return tuple(_kind(value) for value in next(iter(cells))) if cells else empty
 
 
 def _canonical(value: object) -> object:

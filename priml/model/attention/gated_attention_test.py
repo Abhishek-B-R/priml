@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING, override
 
 from torch import Tensor, nn
@@ -10,7 +11,7 @@ import pytest
 import torch
 
 from priml.cost import cost
-from priml.model.attention.flash3 import Flash3Attention
+from priml.model.attention.flash4 import Flash4Attention
 from priml.model.attention.gated_attention import (
     GatedAttention,
     _causal_bias,
@@ -519,7 +520,7 @@ def test_gated_attention_cost_forwards_the_bus_to_the_kernel() -> None:
     config.num_heads = 2
     config.num_heads_kv = 1
     config.channels_head = 4
-    config.attn_kernel = Flash3Attention.Config()
+    config.attn_kernel = Flash4Attention.Config()
     finalized = config.copy_tree().finalize()
     full = finalized.cost(seq_len=8, batch_size=1, dtype=None)
     windowed = finalized.cost(seq_len=8, batch_size=1, dtype=None, window=2)
@@ -557,6 +558,28 @@ def test_gated_attention_cost_hands_dropout_to_the_kernel() -> None:
         == dropped["flops", "elementwise"].sum() - plain["flops", "elementwise"].sum()
     )
     assert wet["flops", "matmul"].sum() == dry["flops", "matmul"].sum()
+
+
+@pytest.mark.parametrize("seq_len", [1, 6])
+def test_gated_attention_cached_step_cost_matches_torch(seq_len: int) -> None:
+    """Queries after a filled cache attend to every cached key and their own.
+
+    ``seq_len=1`` is one decode step, which emits one token; 6 is a chunk.
+    """
+    config = GatedAttention.Config()
+    config.channels_in = 7
+    config.num_heads = 4
+    config.num_heads_kv = 2
+    config.channels_head = 5
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(3, seq_len, 7, requires_grad=True),
+        run=partial(_step_after_cache, context_len=9),
+        seq_len=seq_len,
+        batch_size=3,
+        dtype=None,
+        context_len=9,
+    )
 
 
 def test_gated_attention_traffic_propagates_itemsize() -> None:
@@ -753,7 +776,15 @@ def test_gated_attention_rejects_each_cache_geometry_mismatch(
         )
 
 
+def _step_after_cache(module: nn.Module, x: Tensor, *, context_len: int) -> Tensor:
+    """Attend ``x`` after ``context_len`` tokens of a fresh, zeroed cache."""
+    assert isinstance(module, GatedAttention)
+    state = module.alloc_kv_cache(batch=x.shape[0], max_seq=context_len + x.shape[-2])
+    state.length = state.seen = context_len
+    return module(x, cache=_layer_cache(module, state))
+
+
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing.runner import test_main
 
     test_main(__file__)

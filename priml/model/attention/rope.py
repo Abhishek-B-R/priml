@@ -21,6 +21,7 @@ import math
 
 from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
+from treekle import from_plain
 
 import torch
 
@@ -28,11 +29,11 @@ from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
+    nbytes,
     reduction_cost,
     resolve_dtype,
     traffic,
 )
-from priml.lib.custom_json import convert
 from priml.math.basic import broadcast_sequences
 
 
@@ -286,7 +287,7 @@ class YarnScaling:
 
             """
             current, legacy = (
-                convert(config.get(key), dict[str, object], default=None)
+                from_plain(config.get(key), dict[str, object], default=None)
                 for key in ("rope_parameters", "rope_scaling")
             )
             if current is not None and legacy is not None and current != legacy:
@@ -299,7 +300,7 @@ class YarnScaling:
             # scale factor: that names a scaling without saying which one.
             if kind is None and "factor" not in scaling:
                 return None
-            kind = convert(kind, str)
+            kind = from_plain(kind, str)
             if kind == "default":
                 return None
             if kind != "yarn":
@@ -307,15 +308,15 @@ class YarnScaling:
                     f"Unsupported rope_scaling type={kind!r}; only yarn is implemented.",
                 )
             yarn = cls()
-            yarn.factor = convert(scaling.get("factor"), float)
-            yarn.original_max_position_embeddings = convert(
+            yarn.factor = from_plain(scaling.get("factor"), float)
+            yarn.original_max_position_embeddings = from_plain(
                 scaling.get("original_max_position_embeddings", 4_096),
                 int,
             )
-            yarn.beta_fast = convert(scaling.get("beta_fast", 32.0), float)
-            yarn.beta_slow = convert(scaling.get("beta_slow", 1.0), float)
-            yarn.mscale = convert(scaling.get("mscale", 1.0), float)
-            yarn.mscale_all_dim = convert(scaling.get("mscale_all_dim", 0.0), float)
+            yarn.beta_fast = from_plain(scaling.get("beta_fast", 32.0), float)
+            yarn.beta_slow = from_plain(scaling.get("beta_slow", 1.0), float)
+            yarn.mscale = from_plain(scaling.get("mscale", 1.0), float)
+            yarn.mscale_all_dim = from_plain(scaling.get("mscale_all_dim", 0.0), float)
             return yarn
 
         def cost(
@@ -1329,14 +1330,15 @@ def _learned_frequency_cost(
 ) -> Cost:
     """Count learned frequency gradients over every position without averaging."""
     dt = resolve_dtype(dtype)
-    itemsize = dt.itemsize
     return Cost(
         cells={
             ("flops", "adjoint", "elementwise", dt): rows * (5 * outputs + params),
             ("flops", "adjoint", "reduction", dt): params * (rows - 1),
-            ("bytes", "adjoint", "elementwise", dt): itemsize
-            * (10 * outputs * rows + params * rows + params),
-            ("bytes", "adjoint", "reduction", dt): itemsize * (params * rows + params),
+            ("bytes", "adjoint", "elementwise", dt): nbytes(
+                10 * outputs * rows + params * rows + params,
+                dt,
+            ),
+            ("bytes", "adjoint", "reduction", dt): nbytes(params * rows + params, dt),
         },
         params=params,
         params_active=params,
