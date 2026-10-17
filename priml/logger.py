@@ -7,7 +7,16 @@ Provides :class:`Timer` for scoped elapsed-time logging,
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, Protocol, Self, TextIO, cast, override
+from typing import (
+    TYPE_CHECKING,
+    ClassVar,
+    Final,
+    Protocol,
+    Self,
+    TextIO,
+    cast,
+    override,
+)
 
 import datetime
 import logging
@@ -216,14 +225,14 @@ def replay_buffered_logs() -> None:
                     "funcName": "replay_buffered_logs",
                     "msg": "%d later records not replayed (replay buffer full).",
                     "args": (buffer.dropped,),
-                }
+                },
             ),
         )
     replay.flush()
     root_logger.removeHandler(buffer)
 
 
-_REPLAY_BUFFER_CAPACITY = 10_000
+_REPLAY_BUFFER_CAPACITY: Final = 10_000
 """Records the replay buffer keeps before it stops recording.
 
 Startup logs fit in far fewer. The cap matters when nothing ever replays
