@@ -206,8 +206,31 @@ def replay_buffered_logs() -> None:
     replay.setFormatter(CustomFormatter.Config().make())
     for record in buffer.records:
         replay.emit(record)
+    if buffer.dropped:
+        replay.emit(
+            logging.makeLogRecord(
+                {
+                    "name": __name__,
+                    "levelno": logging.INFO,
+                    "levelname": "INFO",
+                    "funcName": "replay_buffered_logs",
+                    "msg": "%d later records not replayed (replay buffer full).",
+                    "args": (buffer.dropped,),
+                }
+            ),
+        )
     replay.flush()
     root_logger.removeHandler(buffer)
+
+
+_REPLAY_BUFFER_CAPACITY = 10_000
+"""Records the replay buffer keeps before it stops recording.
+
+Startup logs fit in far fewer. The cap matters when nothing ever replays
+(``replay_startup_logs`` is off by default, and only a rank-zero
+:class:`~priml.train.tracker.WandbTracker` calls replay at all): without it
+every record of the run stays in memory, step lines and exception tracebacks
+with their frames included."""
 
 
 class _ReplayBufferHandler(logging.Handler):
@@ -225,10 +248,14 @@ class _ReplayBufferHandler(logging.Handler):
     def __init__(self) -> None:
         super().__init__()
         self.records: list[logging.LogRecord] = []
+        self.dropped: int = 0
 
     @override
     def emit(self, record: logging.LogRecord) -> None:
-        self.records.append(record)
+        if len(self.records) < _REPLAY_BUFFER_CAPACITY:
+            self.records.append(record)
+        else:
+            self.dropped += 1
 
 
 class _StdoutStreamHandler(logging.StreamHandler[TextIO]):
